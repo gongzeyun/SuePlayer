@@ -3,6 +3,7 @@
 
 
 //compile cmd: sudo gcc player.c -lavutil -lavformat -lavcodec -lz -lavutil -lpthread -lm -lswscale -lavfilter -lswresample
+//ffplay -f rawvideo -video_size 1280x720 0239.yuv
 
 static int file_index = 0;
 
@@ -10,7 +11,7 @@ int dump_frame(AVFrame* frame)
 {
     char file_path[256] = {0};
     FILE* pFile;
-    sprintf(file_path, "/home/gongzeyun/work/SuePlayer/%04d.yuv", file_index++);
+    sprintf(file_path, "./%04d.yuv", file_index++);
 
     pFile=fopen(file_path, "wb");
     if(pFile==NULL)
