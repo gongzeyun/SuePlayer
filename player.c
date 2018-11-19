@@ -30,7 +30,7 @@ int dump_frame(AVFrame* frame)
 
 int main(int argc, char* argv[])
 {
-    AVFormatContext *pFormatContext;
+    AVFormatContext *pFormatContext = NULL;
     if (argc < 2) {
        av_log(pFormatContext, AV_LOG_ERROR, "You should specify file path to open");
        return -1;
@@ -50,7 +50,8 @@ int main(int argc, char* argv[])
     av_log(pFormatContext, AV_LOG_ERROR, "open file ====%s==== success\n", pFormatContext->filename);
 
     avformat_find_stream_info(pFormatContext, NULL);
-
+   
+    av_dump_format(pFormatContext, 0, file_name, 0);
     av_log(pFormatContext, AV_LOG_ERROR, "duration:%lld, video_width:%d, video_height:%d\n",
 		pFormatContext->duration, pFormatContext->streams[0]->codecpar->width, pFormatContext->streams[0]->codecpar->height);
 
@@ -66,6 +67,7 @@ int main(int argc, char* argv[])
             av_log(pFormatContext, AV_LOG_ERROR, "alloc condec context failed\n");
             goto fail;
         }
+        avcodec_parameters_to_context(pCodecContext, pFormatContext->streams[AVMEDIA_TYPE_VIDEO]->codecpar);
     }
    
     int ret_open_decoder = avcodec_open2(pCodecContext, NULL, NULL);
@@ -82,15 +84,16 @@ int main(int argc, char* argv[])
             
             if (pkt.stream_index == AVMEDIA_TYPE_VIDEO) {
                 int ret_send_pkt = avcodec_send_packet(pCodecContext, &pkt);
+                //av_log(pFormatContext, AV_LOG_ERROR, "send pkt ret %d\n", ret_send_pkt);
                 int ret_decoder = avcodec_receive_frame(pCodecContext, frame);
                 if (ret_decoder >= 0) {
-                    av_log(pFormatContext, AV_LOG_ERROR, "decoder frame success, line_size_y:%d, line_size_u:%d, line_size_v:%d, width:%d, height:%d\n", 
-			   frame->linesize[0], frame->linesize[1], frame->linesize[2], frame->width, frame->height);
+                    //av_log(pFormatContext, AV_LOG_ERROR, "decoder frame success, line_size_y:%d, line_size_u:%d, line_size_v:%d, width:%d, height:%d\n", 
+			  // frame->linesize[0], frame->linesize[1], frame->linesize[2], frame->width, frame->height);
                     dump_frame(frame);
                     av_frame_unref(frame);
                 }
-            }
-            av_packet_unref(&pkt);          
+            } 
+            av_packet_unref(&pkt);
         }
     }
 #endif
