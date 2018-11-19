@@ -1,8 +1,9 @@
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <SDL2/SDL.h>
 
 
-//compile cmd: sudo gcc player.c -lavutil -lavformat -lavcodec -lz -lavutil -lpthread -lm -lswscale -lavfilter -lswresample
+//compile cmd: sudo gcc player.c -lavutil -lavformat -lavcodec -lz -lavutil -lpthread -lm -lswscale -lavfilter -lswresample -lSDL2
 //ffplay -f rawvideo -video_size 1280x720 0239.yuv
 
 static int file_index = 0;
@@ -31,6 +32,8 @@ int dump_frame(AVFrame* frame)
 int main(int argc, char* argv[])
 {
     AVFormatContext *pFormatContext = NULL;
+    //SDL_Surface *test = NULL;
+    //SDL_Init(SDL_INIT_EVERYTHING);
     if (argc < 2) {
        av_log(pFormatContext, AV_LOG_ERROR, "You should specify file path to open");
        return -1;
