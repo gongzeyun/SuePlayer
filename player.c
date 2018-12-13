@@ -100,7 +100,7 @@ static int create_sdl_window(AVPlayer* player, int width, int height, int pixel_
     
     window = SDL_CreateWindow("test", 0, 0, width, height, SDL_WINDOW_RESIZABLE);
     sdlRenderer = SDL_CreateRenderer(window, -1, 0);
-    sdlTexture = SDL_CreateTexture(sdlRenderer, SDL_PIXELFORMAT_YV12, pixel_format, width, height);
+    sdlTexture = SDL_CreateTexture(sdlRenderer, pixel_format, SDL_TEXTUREACCESS_STREAMING, width, height);
 
 }
 
@@ -112,8 +112,9 @@ int main(int argc, char* argv[])
        av_log(pFormatContext, AV_LOG_ERROR, "You should specify file path to open");
        return -1;
     }
-	
-    create_sdl_window(NULL, 1920, 1080, SDL_PIXELFORMAT_YV12);
+
+	SDL_Event event;
+    
 #if 1	
     const char* file_name = argv[1];
     av_log(pFormatContext, AV_LOG_ERROR, "open file ====%s====\n", file_name);
@@ -148,7 +149,9 @@ int main(int argc, char* argv[])
         }
         avcodec_parameters_to_context(pCodecContext, pFormatContext->streams[AVMEDIA_TYPE_VIDEO]->codecpar);
     }
-   
+    int video_width = pFormatContext->streams[AVMEDIA_TYPE_VIDEO]->codecpar->width;
+    int video_height = pFormatContext->streams[AVMEDIA_TYPE_VIDEO]->codecpar->height;
+    create_sdl_window(NULL, video_width, video_height, SDL_PIXELFORMAT_IYUV);
     int ret_open_decoder = avcodec_open2(pCodecContext, NULL, NULL);
     if (0 == ret_open_decoder) {
         av_log(pFormatContext, AV_LOG_ERROR, "open decoder %s success\n", pCodec->name);
@@ -167,6 +170,7 @@ int main(int argc, char* argv[])
                 int ret_decoder = avcodec_receive_frame(pCodecContext, frame);
                 if (ret_decoder >= 0) {
                     //dump_frame(frame);
+                    SDL_PollEvent(&event);
                     SDL_UpdateYUVTexture(sdlTexture, NULL, frame->data[0], frame->linesize[0],
                                                   frame->data[1], frame->linesize[1],
                                                   frame->data[2], frame->linesize[2]);
