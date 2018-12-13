@@ -27,6 +27,16 @@ typedef struct AudioRender {
 typedef struct AVPlayer {
 	VideoRender *video_render;
 	AudioRender *audio_render;
+
+	/* video info */
+	int video_width;
+	int video_height;
+
+	/* audio info */
+	int audio_samplerate;
+	int audio_channels;
+	int audio_format;
+	
 }AVPlayer;
 
 
@@ -57,6 +67,9 @@ static const struct TextureFormatEntry {
 };
 
 AVPlayer player;
+SDL_Window* window;
+SDL_Renderer* sdlRenderer;
+SDL_Texture* sdlTexture;
 
 int dump_frame(AVFrame* frame)
 {
@@ -80,11 +93,15 @@ int dump_frame(AVFrame* frame)
 }
 
 
-static int create_sdl_window()
+
+static int create_sdl_window(AVPlayer* player, int width, int height, int pixel_format)
 {
     SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO);
-    SDL_Window* window = SDL_CreateWindow("test", 0, 0, 1920, 1080, SDL_WINDOW_RESIZABLE);
-	//player->video_render->window = window;
+    
+    window = SDL_CreateWindow("test", 0, 0, width, height, SDL_WINDOW_RESIZABLE);
+    sdlRenderer = SDL_CreateRenderer(window, -1, 0);
+    sdlTexture = SDL_CreateTexture(sdlRenderer, SDL_PIXELFORMAT_YV12, pixel_format, width, height);
+
 }
 
 int main(int argc, char* argv[])
@@ -96,11 +113,8 @@ int main(int argc, char* argv[])
        return -1;
     }
 	
-    create_sdl_window();
-    while (1) {
-        usleep(100 * 1000);
-    }
-#if 0	
+    create_sdl_window(NULL, 1920, 1080, SDL_PIXELFORMAT_YV12);
+#if 1	
     const char* file_name = argv[1];
     av_log(pFormatContext, AV_LOG_ERROR, "open file ====%s====\n", file_name);
 
@@ -152,10 +166,20 @@ int main(int argc, char* argv[])
                 //av_log(pFormatContext, AV_LOG_ERROR, "send pkt ret %d\n", ret_send_pkt);
                 int ret_decoder = avcodec_receive_frame(pCodecContext, frame);
                 if (ret_decoder >= 0) {
-                    //av_log(pFormatContext, AV_LOG_ERROR, "decoder frame success, line_size_y:%d, line_size_u:%d, line_size_v:%d, width:%d, height:%d\n", 
-			  // frame->linesize[0], frame->linesize[1], frame->linesize[2], frame->width, frame->height);
-                    dump_frame(frame);
+                    //dump_frame(frame);
+                    SDL_UpdateYUVTexture(sdlTexture, NULL, frame->data[0], frame->linesize[0],
+                                                  frame->data[1], frame->linesize[1],
+                                                  frame->data[2], frame->linesize[2]);
+                    SDL_Rect sdlRect;
+                    sdlRect.x = 0;  
+                    sdlRect.y = 0;  
+                    sdlRect.w = 1920;  
+                    sdlRect.h = 1080;
+                    SDL_RenderClear(sdlRenderer);
+                    SDL_RenderCopy(sdlRenderer, sdlTexture, NULL, &sdlRect);
+                    SDL_RenderPresent(sdlRenderer);
                     av_frame_unref(frame);
+					usleep(40 * 1000);
                 }
             } 
             av_packet_unref(&pkt);
