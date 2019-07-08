@@ -28,6 +28,8 @@ typedef struct AVPlayer {
 	VideoRender *video_render;
 	AudioRender *audio_render;
 
+        AVFormatContext *context;
+        AVCodecContext* vcodec_context;
 	/* video info */
 	int video_width;
 	int video_height;
@@ -104,70 +106,86 @@ static int create_sdl_window(AVPlayer* player, int width, int height, int pixel_
 
 }
 
+static int open_video_decoder(AVFormatContext* context) {
+
+    int ret = -1;
+
+    AVCodec* pCodec = NULL;
+    pCodec = avcodec_find_decoder(context->streams[AVMEDIA_TYPE_VIDEO]->codecpar->codec_id);
+    if (NULL != pCodec) {
+        player.vcodec_context = avcodec_alloc_context3(pCodec);
+        if (NULL == player.vcodec_context) {
+            av_log(context, AV_LOG_ERROR, "alloc condec context failed\n");
+            ret = -1;
+            goto fail;
+        }
+        avcodec_parameters_to_context(player.vcodec_context, context->streams[AVMEDIA_TYPE_VIDEO]->codecpar);
+    }
+    ret = avcodec_open2(player.vcodec_context, NULL, NULL);
+    if (0 == ret) {
+        av_log(player.context, AV_LOG_DEBUG, "%s, open decoder ==%s== success\n", __func__, pCodec->name);
+    }
+fail:
+    return ret;
+}
+
+
+static int streams_open(AVFormatContext **context, const char*name) {
+    int ret;
+    ret = avformat_open_input(context, name, NULL, NULL);
+    if (ret < 0) {
+        av_log(NULL, AV_LOG_ERROR, "%s, open %s failed!!!!\n", __func__, name);
+        return ret;
+    }
+
+    return avformat_find_stream_info(*context, NULL);
+}
+
+
 int main(int argc, char* argv[])
 {
-    AVFormatContext *pFormatContext = NULL;
-    
+    int ret = 0;
     if (argc < 2) {
-       av_log(pFormatContext, AV_LOG_ERROR, "You should specify file path to open");
+       av_log(NULL, AV_LOG_ERROR, "You should specify file to open");
        return -1;
     }
 
-	SDL_Event event;
+    SDL_Event event;
     
 #if 1	
     const char* file_name = argv[1];
-    av_log(pFormatContext, AV_LOG_ERROR, "open file ====%s====\n", file_name);
+    av_log(NULL, AV_LOG_ERROR, "====source:%s\n", file_name);
 
     av_register_all();
 
-    int open_ret = avformat_open_input(&pFormatContext, file_name, NULL, NULL);
-    if (open_ret < 0) {
-        av_log(pFormatContext, AV_LOG_ERROR, "open file %s failed!!!!\n");
+
+    ret = streams_open(&player.context, file_name);
+    if (ret < 0) {
+        av_log(NULL, AV_LOG_ERROR, "====open %s failed, goto fail\n", file_name);
         goto fail;
     }
+    av_dump_format(player.context, 0, file_name, 0);
 
-    av_log(pFormatContext, AV_LOG_ERROR, "open file ====%s==== success\n", pFormatContext->filename);
 
-    avformat_find_stream_info(pFormatContext, NULL);
-   
-    av_dump_format(pFormatContext, 0, file_name, 0);
-    av_log(pFormatContext, AV_LOG_ERROR, "duration:%lld, video_width:%d, video_height:%d\n",
-		pFormatContext->duration, pFormatContext->streams[0]->codecpar->width, pFormatContext->streams[0]->codecpar->height);
-
-    //open decoder
-    AVCodec* pCodec = NULL;
-    AVCodecContext* pCodecContext = NULL;
-    AVFrame *frame = av_frame_alloc();
-    pCodec = avcodec_find_decoder(pFormatContext->streams[AVMEDIA_TYPE_VIDEO]->codecpar->codec_id);
-    if (NULL != pCodec) {
-        av_log(pFormatContext, AV_LOG_ERROR, "codec name:%s\n", pCodec->name);
-        pCodecContext = avcodec_alloc_context3(pCodec);
-        if (NULL == pCodecContext) {
-            av_log(pFormatContext, AV_LOG_ERROR, "alloc condec context failed\n");
-            goto fail;
-        }
-        avcodec_parameters_to_context(pCodecContext, pFormatContext->streams[AVMEDIA_TYPE_VIDEO]->codecpar);
-    }
-    int video_width = pFormatContext->streams[AVMEDIA_TYPE_VIDEO]->codecpar->width;
-    int video_height = pFormatContext->streams[AVMEDIA_TYPE_VIDEO]->codecpar->height;
+    int video_width = player.context->streams[AVMEDIA_TYPE_VIDEO]->codecpar->width;
+    int video_height = player.context->streams[AVMEDIA_TYPE_VIDEO]->codecpar->height;
     create_sdl_window(NULL, video_width, video_height, SDL_PIXELFORMAT_IYUV);
-    int ret_open_decoder = avcodec_open2(pCodecContext, NULL, NULL);
-    if (0 == ret_open_decoder) {
-        av_log(pFormatContext, AV_LOG_ERROR, "open decoder %s success\n", pCodec->name);
+
+    AVFrame *frame = av_frame_alloc();
+    
+    if (0 == open_video_decoder(player.context)) {
 #if 1
         AVPacket pkt;
         while (frame != NULL) {
-            int read_ret = av_read_frame(pFormatContext, &pkt);
+            int read_ret = av_read_frame(player.context, &pkt);
             if (read_ret < 0) {
-                av_log(pFormatContext, AV_LOG_ERROR, "read packet failed\n");
+                av_log(player.context, AV_LOG_ERROR, "read packet failed\n");
                 break;
             }
             
             if (pkt.stream_index == AVMEDIA_TYPE_VIDEO) {
-                int ret_send_pkt = avcodec_send_packet(pCodecContext, &pkt);
-                //av_log(pFormatContext, AV_LOG_ERROR, "send pkt ret %d\n", ret_send_pkt);
-                int ret_decoder = avcodec_receive_frame(pCodecContext, frame);
+                int ret_send_pkt = avcodec_send_packet(player.vcodec_context, &pkt);
+                int ret_decoder = avcodec_receive_frame(player.vcodec_context, frame);
                 if (ret_decoder >= 0) {
                     //dump_frame(frame);
                     SDL_PollEvent(&event);
@@ -183,7 +201,7 @@ int main(int argc, char* argv[])
                     SDL_RenderCopy(sdlRenderer, sdlTexture, NULL, &sdlRect);
                     SDL_RenderPresent(sdlRenderer);
                     av_frame_unref(frame);
-					usleep(40 * 1000);
+                    usleep(40 * 1000);
                 }
             } 
             av_packet_unref(&pkt);
@@ -191,10 +209,10 @@ int main(int argc, char* argv[])
     }
 #endif
 fail:
-    avcodec_close(pCodecContext);
-    avcodec_free_context(&pCodecContext);
+    avcodec_close(player.vcodec_context);
+    avcodec_free_context(&player.vcodec_context);
     av_frame_free(frame);
-    avformat_close_input(&pFormatContext);
+    avformat_close_input(&player.context);
 #endif
     return 0;
 }
