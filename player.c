@@ -7,6 +7,11 @@
 //ffplay -f rawvideo -video_size 1280x720 0239.yuv
 
 static int file_index = 0;
+/* Minimum SDL audio buffer size, in samples. */
+#define SDL_AUDIO_MIN_BUFFER_SIZE 512
+/* Calculate actual buffer size keeping in mind not cause too frequent audio callbacks */
+#define SDL_AUDIO_MAX_CALLBACKS_PER_SEC 30
+
 
 typedef struct VideoRender{
 	SDL_Window* window;
@@ -30,7 +35,8 @@ typedef struct AVPlayer {
 
     AVFormatContext *context;
     AVCodecContext* vcodec_context;
-	
+	AVCodecContext* acodec_context;
+
 	/* video info */
 	int video_width;
 	int video_height;
@@ -42,7 +48,12 @@ typedef struct AVPlayer {
 
     SDL_Thread* main_thread;
     SDL_Thread* video_refresh;
-    SDL_Thread* audio_refresh;        
+    SDL_Thread* audio_refresh;
+
+
+    AVFilterContext *src_audio_filter;
+    AVFilterContext *sink_audio_filter;
+    AVFilterGraph *audio_graph;
 	
 }AVPlayer;
 
@@ -77,6 +88,11 @@ AVPlayer player;
 SDL_Window* window;
 SDL_Renderer* sdlRenderer;
 SDL_Texture* sdlTexture;
+static SDL_AudioDeviceID audio_render;
+Uint8 pcm_buffer[8192] = {0};
+static int size_pcm_played = 0;
+pthread_mutex_t pcm_buffer_lock;
+
 
 int dump_frame(AVFrame* frame)
 {
@@ -100,6 +116,35 @@ int dump_frame(AVFrame* frame)
 }
 
 
+int dump_audio(Uint8* data, int length)
+{
+    FILE* pFile;
+    const char* file_path = "./audio.pcm";
+
+    pFile = fopen(file_path, "ab+");
+    if(pFile==NULL)
+        return;
+    
+    fwrite(data, 1, length, pFile);
+
+ 
+    fclose(pFile);
+}
+
+static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
+	if (0 == size_pcm_played) {
+        pthread_mutex_lock(&pcm_buffer_lock);
+    }
+	//memcpy(buffer, pcm_buffer + size_pcm_played, len);
+	SDL_MixAudioFormat(buffer, pcm_buffer + size_pcm_played, AUDIO_S16SYS, 4096, SDL_MIX_MAXVOLUME);
+	size_pcm_played += len;
+    av_log(NULL, AV_LOG_ERROR, "%s, size pcm played:%d\n", __func__, size_pcm_played);
+	if (8192 == size_pcm_played) {
+		size_pcm_played = 0;
+	    pthread_mutex_unlock(&pcm_buffer_lock);
+    }
+}
+
 
 static int create_video_render(int width, int height, int pixel_format)
 {
@@ -111,7 +156,31 @@ static int create_video_render(int width, int height, int pixel_format)
 
 }
 
-static int create_audio_render(int channels, )
+static int create_audio_render(int channels, int samplerate, int format) {
+    SDL_AudioSpec request_params, response_params;
+	request_params.channels = channels;
+    request_params.freq = samplerate;
+    if (request_params.freq <= 0 || request_params.channels <= 0) {
+        av_log(NULL, AV_LOG_ERROR, "Invalid sample rate or channel count!\n");
+        return -1;
+    }
+    request_params.format = AUDIO_S16SYS;
+    request_params.silence = 0;
+    request_params.samples = FFMAX(SDL_AUDIO_MIN_BUFFER_SIZE, 2 << av_log2(request_params.freq / SDL_AUDIO_MAX_CALLBACKS_PER_SEC));
+    request_params.callback = fill_pcm_data;
+    request_params.userdata = NULL;
+
+    audio_render = SDL_OpenAudioDevice(NULL, 0, &request_params, &response_params, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE);
+    if (audio_render) {
+        av_log(NULL, AV_LOG_ERROR, "audio render info:\n");
+        av_log(NULL, AV_LOG_ERROR, "\t\trequest(channels:%d, sample:%d, format:%d)\n", request_params.channels, request_params.freq, request_params.format);
+        av_log(NULL, AV_LOG_ERROR, "\t\tresponse(channels:%d, sample:%d, format:%d)\n", response_params.channels, response_params.freq, response_params.format);
+    }
+    SDL_PauseAudioDevice(audio_render, 0);
+	return 0;
+}
+
+
 static int open_video_decoder(AVFormatContext* context) {
 
     int ret = -1;
@@ -135,6 +204,34 @@ fail:
     return ret;
 }
 
+
+static int open_audio_decoder(AVFormatContext* context) {
+	int ret = -1;
+
+    AVCodec* pCodec = NULL;
+    pCodec = avcodec_find_decoder(context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->codec_id);
+    if (NULL != pCodec) {
+        player.acodec_context = avcodec_alloc_context3(pCodec);
+        if (NULL == player.acodec_context) {
+            av_log(context, AV_LOG_ERROR, "alloc condec context failed\n");
+            ret = -1;
+            goto fail;
+        }
+        player.audio_samplerate = context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->sample_rate;
+        player.audio_channels = context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->channels;
+        player.audio_format = context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->format;
+	
+        avcodec_parameters_to_context(player.acodec_context, context->streams[AVMEDIA_TYPE_AUDIO]->codecpar);
+    }
+    ret = avcodec_open2(player.acodec_context, NULL, NULL);
+    if (0 == ret) {
+        av_log(player.context, AV_LOG_ERROR, "%s, open decoder ==%s== success\n", __func__, pCodec->name);
+        av_log(player.context , AV_LOG_ERROR, "audio_info (channels:%d, samplerate:%d, format:%d)\n", 
+             player.audio_channels, player.audio_samplerate, player.audio_format);
+    }
+fail:
+	return ret;
+}
 
 static int streams_open(AVFormatContext **context, const char*name) {
     int ret;
@@ -161,6 +258,11 @@ static int streams_open(AVFormatContext **context, const char*name) {
         return ret;
     }
 
+	ret = open_audio_decoder(*context);
+    if (ret < 0) {
+        av_log(context, AV_LOG_ERROR, "%s, open audio decoder failed\n", __func__);
+    }
+	
     return ret;
 }
 
@@ -196,13 +298,16 @@ static int render_video_frame(AVFrame* frame) {
 }
 
 
+
 static void main_threadloop(AVFormatContext* context) {
     int ret = -1;
-    AVFrame *frame = NULL;
+    AVFrame *video_frame = NULL;
+	AVFrame *audio_frame = NULL;
     AVPacket pkt;
 	
-    frame = av_frame_alloc();
-    while (frame != NULL) {
+    video_frame = av_frame_alloc();
+	audio_frame = av_frame_alloc();
+    while (video_frame != NULL && audio_frame != NULL) {
         int read_ret = av_read_frame(player.context, &pkt);
         if (read_ret < 0) {
             av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", ret);
@@ -211,17 +316,30 @@ static void main_threadloop(AVFormatContext* context) {
     
         if (pkt.stream_index == AVMEDIA_TYPE_VIDEO) {
             int ret_send_pkt = avcodec_send_packet(player.vcodec_context, &pkt);
-            int ret_decoder = avcodec_receive_frame(player.vcodec_context, frame);
+            int ret_decoder = avcodec_receive_frame(player.vcodec_context, video_frame);
             if (ret_decoder >= 0) {
-                render_video_frame(frame);
-                av_frame_unref(frame);
+                render_video_frame(video_frame);
+                av_frame_unref(video_frame);
                 usleep(40 * 1000);
             }
         } 
+        if (pkt.stream_index == AVMEDIA_TYPE_AUDIO) {
+            int ret_send_pkt = avcodec_send_packet(player.acodec_context, &pkt);
+            int ret_decoder = avcodec_receive_frame(player.acodec_context, audio_frame);
+			if (ret_decoder >= 0 ) {
+                av_log(NULL, AV_LOG_ERROR, "pcm size:%d, sample:%d, format:%d, channel_layout:%d\n", audio_frame->linesize[0], 
+					audio_frame->sample_rate, audio_frame->format, audio_frame->channel_layout);
+                pthread_mutex_lock(&pcm_buffer_lock);				
+				memcpy(pcm_buffer, audio_frame->data[0], audio_frame->linesize[0]);
+				dump_audio(pcm_buffer, audio_frame->linesize[0]);
+				pthread_mutex_unlock(&pcm_buffer_lock);
+				av_frame_unref(audio_frame);
+		    }
+        }
         av_packet_unref(&pkt);
     }
-    av_frame_free(frame);
-
+    av_frame_free(video_frame);
+    av_frame_free(audio_frame);
 	streams_close();
     return;
 }
@@ -256,9 +374,10 @@ int main(int argc, char* argv[])
     av_dump_format(player.context, 0, file_name, 0);
 
 
-    
+    pthread_mutex_init(&pcm_buffer_lock, NULL); 
     create_video_render(player.video_width, player.video_height, SDL_PIXELFORMAT_IYUV);
 
+    create_audio_render(player.audio_channels, player.audio_samplerate, player.audio_format);
     //create main thread
     player.main_thread = SDL_CreateThread(main_threadloop, "main_threadloop", player.context);
 
