@@ -31,6 +31,26 @@ typedef struct AudioRender {
 }AudioRender;
 
 
+typedef struct SueAVPacket {
+    AVPacket pkt;
+    int serial;
+    int64_t ts_enter_queue; //timestamp enter queue
+    struct SueAVPacket* next;
+}SueAVPacket;
+
+typedef struct PacketQueue {
+    SueAVPacket* first_pkt;
+    SueAVPacket* last_pkt;
+    int num_packets;
+    int serial;
+    int64_t duration;
+    pthread_mutex_t queue_lock;
+    pthread_cond_t queue_cond;
+
+    int abort;
+}PacketQueue;
+
+
 typedef struct AVPlayer {
     VideoRender *video_render;
     AudioRender *audio_render;
@@ -50,11 +70,14 @@ typedef struct AVPlayer {
     int64_t  audio_channel_layout;
     SDL_Thread* main_thread;
     SDL_Thread* video_refresh;
-    SDL_Thread* audio_refresh;
+    SDL_Thread* audio_decoder_thread;
 
     AVFilterContext *src_audio_filter;
     AVFilterContext *sink_audio_filter;
     AVFilterGraph *audio_graph;
+
+    PacketQueue video_queue;
+    PacketQueue audio_queue;
 }AVPlayer;
 
 
@@ -90,10 +113,90 @@ SDL_Renderer* sdlRenderer;
 SDL_Texture* sdlTexture;
 static SDL_AudioDeviceID audio_render;
 
+static int packet_queue_init(PacketQueue *queue) {
+    queue->first_pkt = NULL;
+    queue->last_pkt = NULL;
+    queue->num_packets = 0;
+    queue->serial = 0;
+    queue->duration = 0;
+    queue->abort = 0;
 
-Uint8 pcm_buffer[4096] = {0};
-pthread_mutex_t pcm_buffer_lock;
-pthread_cond_t pcm_cond;
+    pthread_mutex_init(&(queue->queue_lock), NULL);
+    pthread_cond_init(&(queue->queue_cond), NULL);
+}
+
+static int packet_queue_put(PacketQueue *queue, AVPacket *pkt) {
+    pthread_mutex_lock(&(queue->queue_lock));
+    SueAVPacket *sue_pkt = av_malloc(sizeof(SueAVPacket));
+    if (sue_pkt == NULL) {
+        pthread_mutex_unlock(&(queue->queue_lock));
+        av_log(NULL, AV_LOG_ERROR, "no memory, queue pkt(stream:%d, pts:%lld) failed\n", pkt->stream_index, pkt->pts);
+        return -1;
+    }
+
+    sue_pkt->pkt = *pkt;
+    sue_pkt->serial = queue->serial;
+    sue_pkt->next = NULL;
+
+    if (queue->last_pkt) {
+       queue->last_pkt->next = sue_pkt;
+    }
+    queue->last_pkt = sue_pkt;
+    queue->num_packets++;
+    if (queue->first_pkt == NULL) {
+        queue->first_pkt = queue->last_pkt;
+    }
+    av_log(NULL, AV_LOG_ERROR, "queue pkt(stream:%d, pts:%lld) success, pkt_num:%d\n", pkt->stream_index, pkt->pts, queue->num_packets);
+	pthread_cond_signal(&(queue->queue_cond));
+    pthread_mutex_unlock(&(queue->queue_lock));
+
+    return 0;
+}
+
+static int packet_queue_get(PacketQueue *queue, AVPacket* pkt) {
+    int ret = -1;
+    pthread_mutex_lock(&(queue->queue_lock));
+    while (!queue->abort) {
+        if(queue->first_pkt) {
+            SueAVPacket *sue_pkt = queue->first_pkt;
+            *pkt = sue_pkt->pkt;
+            queue->first_pkt = sue_pkt->next;
+            queue->num_packets--;
+            if (queue->first_pkt == NULL) {
+                queue->last_pkt = NULL;
+            }
+            av_log(NULL, AV_LOG_ERROR, "dequeue pkt(stream:%d, pts:%lld) success, pkt_num:%d\n", pkt->stream_index, pkt->pts, queue->num_packets);
+            av_free(sue_pkt);
+            ret = 0;
+            break;
+        } else {
+            pthread_cond_wait(&(queue->queue_cond), &(queue->queue_lock));
+        }
+    }
+    pthread_mutex_unlock(&(queue->queue_lock));
+    return ret;
+}
+
+static void packet_queue_flush(PacketQueue *queue)
+{
+    SueAVPacket *pkt, *pkt1;
+    pthread_mutex_lock(&(queue->queue_lock));
+    for (pkt = queue->first_pkt; pkt; pkt = pkt1) {
+        pkt1 = pkt->next;
+        av_packet_unref(&pkt->pkt);
+        av_freep(&pkt);
+    }
+    queue->last_pkt = NULL;
+    queue->first_pkt = NULL;
+    queue->num_packets = 0;
+    pthread_mutex_lock(&(queue->queue_lock));
+}
+
+static int packet_queue_destroy(PacketQueue *queue) {
+    packet_queue_flush(queue);
+    pthread_mutex_destroy(&(queue->queue_lock));
+    pthread_cond_destroy(&(queue->queue_cond));
+}
 
 int dump_frame(AVFrame* frame)
 {
@@ -146,8 +249,13 @@ int dump_audio(Uint8* data, int length)
     fclose(pFile);
 }
 
+static release_audio_filter() {
+    avfilter_graph_free(&player.audio_graph);
+}
+
+
 static int init_audio_filter() {
-    char args[512];
+    char args[512] = {0};
     int ret = 0;
     const AVFilter *abuffersrc  = avfilter_get_by_name("abuffer");
     const AVFilter *abuffersink = avfilter_get_by_name("abuffersink");
@@ -197,17 +305,14 @@ static int init_audio_filter() {
 
 end:
 	 if (ret < 0)
-        avfilter_graph_free(player.audio_graph);
+        avfilter_graph_free(&player.audio_graph);
     return ret;
 }
 
 static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
-    pthread_cond_signal(&pcm_cond);
-	SDL_memset(buffer, 0, len);
-	SDL_MixAudio(buffer, (Uint8 *)pcm_buffer, len, SDL_MIX_MAXVOLUME);
-    av_log(NULL, AV_LOG_ERROR, "%s, size pcm played:%d\n", __func__, len);
+    //SDL_memset(buffer, 0, len);
+    //SDL_MixAudio(buffer, filter_audio_frame->data[0], size_audio_sample, SDL_MIX_MAXVOLUME);
 }
-
 
 static int create_video_render(int width, int height, int pixel_format)
 {
@@ -294,6 +399,48 @@ fail:
 	return ret;
 }
 
+static int audio_decoder_threadloop() {
+    AVPacket pkt;
+    int ret;
+    AVFrame* audio_frame = av_frame_alloc();
+    AVFrame* filter_audio_frame = av_frame_alloc();
+	while(!(player.audio_queue.abort)) {
+		ret = packet_queue_get(&player.audio_queue, &pkt);
+        if (-1 == ret) {
+            continue;
+        }
+		avcodec_send_packet(player.acodec_context, &pkt);
+		int ret_decoder = avcodec_receive_frame(player.acodec_context, audio_frame);
+		if (ret_decoder >= 0 ) {
+			if ((ret = av_buffersrc_add_frame_flags(player.src_audio_filter, audio_frame, AV_BUFFERSRC_FLAG_KEEP_REF)) < 0) {
+				av_log(NULL, AV_LOG_ERROR, "send frame to src audio filter failed\n");
+				goto go_on;
+			}
+			while (1) {
+				ret = av_buffersink_get_frame(player.sink_audio_filter, filter_audio_frame);
+				if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+					av_log(NULL, AV_LOG_ERROR, "get filterd audio frame failed, go on\n");
+					goto go_on;
+				}
+				if (ret == 0) {
+					int size_audio_sample = 2 * filter_audio_frame->nb_samples * av_get_channel_layout_nb_channels(filter_audio_frame->channel_layout);
+					av_log(NULL, AV_LOG_ERROR, "get audio samples %d bytes from audio filter\n", size_audio_sample);
+                    dump_audio(filter_audio_frame->data[0], size_audio_sample);
+					av_frame_unref(filter_audio_frame);
+					av_frame_unref(audio_frame);
+				} else {
+					av_log(NULL, AV_LOG_ERROR, "get filterd audio frame failed\n");
+					break;
+				}
+			}
+		}
+go_on:
+		av_packet_unref(&pkt);
+		av_frame_unref(filter_audio_frame);
+		av_frame_unref(audio_frame);
+	}
+    av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
+}
 static int streams_open(AVFormatContext **context, const char*name) {
     int ret;
     ret = avformat_open_input(context, name, NULL, NULL);
@@ -323,8 +470,10 @@ static int streams_open(AVFormatContext **context, const char*name) {
     if (ret < 0) {
         av_log(context, AV_LOG_ERROR, "%s, open audio decoder failed\n", __func__);
     }
-
+    packet_queue_init(&player.audio_queue);
     init_audio_filter();
+
+    player.audio_decoder_thread	= SDL_CreateThread(audio_decoder_threadloop, "audio_decoder_threadloop", player.context);
     return ret;
 }
 
@@ -337,7 +486,15 @@ static int streams_close() {
 	if (player.context != NULL) {
         avformat_close_input(&player.context);
 	}
+    player.audio_queue.abort = 1;
+    av_log(NULL, AV_LOG_ERROR, "set audio queue abort flag\n");
+    pthread_mutex_lock(&(player.audio_queue.queue_lock));
+    pthread_cond_signal(&(player.audio_queue.queue_cond));
+    pthread_mutex_unlock(&(player.audio_queue.queue_lock));
 
+    SDL_WaitThread(player.audio_decoder_thread, NULL);
+    release_audio_filter();
+    packet_queue_destroy(&player.audio_queue);
     return 0;
 }
 
@@ -364,14 +521,10 @@ static int render_video_frame(AVFrame* frame) {
 static void main_threadloop(AVFormatContext* context) {
     int ret = -1;
     AVFrame *video_frame = NULL;
-    AVFrame *audio_frame = NULL;
-    AVFrame *filter_audio_frame = NULL;
     AVPacket pkt;
 
     video_frame = av_frame_alloc();
-    audio_frame = av_frame_alloc();
-    filter_audio_frame = av_frame_alloc();
-    while (video_frame != NULL && audio_frame != NULL && filter_audio_frame != NULL) {
+    while (video_frame != NULL) {
         int read_ret = av_read_frame(player.context, &pkt);
         if (read_ret < 0) {
             av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", ret);
@@ -387,41 +540,12 @@ static void main_threadloop(AVFormatContext* context) {
             }
         } 
         if (pkt.stream_index == AVMEDIA_TYPE_AUDIO) {
-            int ret_send_pkt = avcodec_send_packet(player.acodec_context, &pkt);
-            int ret_decoder = avcodec_receive_frame(player.acodec_context, audio_frame);
-            if (ret_decoder >= 0 ) {
-                if ((ret = av_buffersrc_add_frame_flags(player.src_audio_filter, audio_frame, AV_BUFFERSRC_FLAG_KEEP_REF)) < 0) {
-                    av_log(NULL, AV_LOG_ERROR, "send frame to src audio filter failed\n");
-                    goto go_on;
-                }
-                while (1) {
-                    ret = av_buffersink_get_frame(player.sink_audio_filter, filter_audio_frame);
-                    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                        //av_log(NULL, AV_LOG_ERROR, "get filterd audio frame failed, go on\n");
-                        goto go_on;
-                    }
-                    if (ret == 0) {
-                        pthread_mutex_lock(&pcm_buffer_lock);
-                        pthread_cond_wait(&pcm_cond, &pcm_buffer_lock);
-                        int size_audio_sample = 2 * filter_audio_frame->nb_samples * av_get_channel_layout_nb_channels(filter_audio_frame->channel_layout);
-                        av_log(NULL, AV_LOG_ERROR, "get audio samples %d bytes from audio filter\n", size_audio_sample);
-                        memcpy(pcm_buffer, filter_audio_frame->data[0], size_audio_sample);
-                        pthread_mutex_unlock(&pcm_buffer_lock);
-                    } else {
-                        av_log(NULL, AV_LOG_ERROR, "get filterd audio frame failed\n");
-                        break;
-                    }
-                }
-go_on:
-                av_frame_unref(filter_audio_frame);
-                av_frame_unref(audio_frame);
-            }
+            packet_queue_put(&player.audio_queue, &pkt);
         }
-        av_packet_unref(&pkt);
     }
     av_frame_free(video_frame);
-    av_frame_free(audio_frame);
 	streams_close();
+    av_log(NULL, AV_LOG_ERROR, "main thread exit success\n");
     return;
 }
 
@@ -453,9 +577,6 @@ int main(int argc, char* argv[])
     }
     av_dump_format(player.context, 0, file_name, 0);
 
-
-    pthread_mutex_init(&pcm_buffer_lock, NULL);
-	pthread_cond_init(&pcm_cond, NULL);
     create_video_render(player.video_width, player.video_height, SDL_PIXELFORMAT_IYUV);
 
     create_audio_render(player.audio_channels, player.audio_samplerate, player.audio_format);
