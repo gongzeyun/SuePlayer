@@ -1,5 +1,8 @@
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersrc.h>
+#include <libavutil/opt.h>
 #include <SDL2/SDL.h>
 
 
@@ -11,7 +14,6 @@ static int file_index = 0;
 #define SDL_AUDIO_MIN_BUFFER_SIZE 512
 /* Calculate actual buffer size keeping in mind not cause too frequent audio callbacks */
 #define SDL_AUDIO_MAX_CALLBACKS_PER_SEC 30
-
 
 typedef struct VideoRender{
 	SDL_Window* window;
@@ -30,31 +32,29 @@ typedef struct AudioRender {
 
 
 typedef struct AVPlayer {
-	VideoRender *video_render;
-	AudioRender *audio_render;
+    VideoRender *video_render;
+    AudioRender *audio_render;
 
     AVFormatContext *context;
     AVCodecContext* vcodec_context;
-	AVCodecContext* acodec_context;
+    AVCodecContext* acodec_context;
 
-	/* video info */
-	int video_width;
-	int video_height;
+    /* video info */
+    int video_width;
+    int video_height;
 
-	/* audio info */
-	int audio_samplerate;
-	int audio_channels;
-	int audio_format;
-
+    /* audio info */
+    int audio_samplerate;
+    int audio_channels;
+    int audio_format;
+    int64_t  audio_channel_layout;
     SDL_Thread* main_thread;
     SDL_Thread* video_refresh;
     SDL_Thread* audio_refresh;
 
-
     AVFilterContext *src_audio_filter;
     AVFilterContext *sink_audio_filter;
     AVFilterGraph *audio_graph;
-	
 }AVPlayer;
 
 
@@ -89,10 +89,11 @@ SDL_Window* window;
 SDL_Renderer* sdlRenderer;
 SDL_Texture* sdlTexture;
 static SDL_AudioDeviceID audio_render;
-Uint8 pcm_buffer[8192] = {0};
-static int size_pcm_played = 0;
-pthread_mutex_t pcm_buffer_lock;
 
+
+Uint8 pcm_buffer[4096] = {0};
+pthread_mutex_t pcm_buffer_lock;
+pthread_cond_t pcm_cond;
 
 int dump_frame(AVFrame* frame)
 {
@@ -116,6 +117,20 @@ int dump_frame(AVFrame* frame)
 }
 
 
+int dump_audio_sdl(Uint8* data, int length)
+{
+    FILE* pFile;
+    const char* file_path = "./audio_sdl.pcm";
+
+    pFile = fopen(file_path, "ab+");
+    if(pFile==NULL)
+        return;
+
+    fwrite(data, 1, length, pFile);
+
+    fclose(pFile);
+}
+
 int dump_audio(Uint8* data, int length)
 {
     FILE* pFile;
@@ -131,24 +146,72 @@ int dump_audio(Uint8* data, int length)
     fclose(pFile);
 }
 
+static int init_audio_filter() {
+    char args[512];
+    int ret = 0;
+    const AVFilter *abuffersrc  = avfilter_get_by_name("abuffer");
+    const AVFilter *abuffersink = avfilter_get_by_name("abuffersink");
+
+	static const enum AVSampleFormat out_sample_fmts[2] = {AV_SAMPLE_FMT_S16, -1};
+	static const out_channels[2] = {2, -1};
+    static const int64_t out_channel_layouts[2] = {AV_CH_LAYOUT_STEREO, -1};
+    static const int out_sample_rates[2] = {44100, -1};
+
+	player.audio_graph = avfilter_graph_alloc();
+    if (!player.audio_graph) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+    snprintf(args, sizeof(args),
+              "sample_rate=%d:sample_fmt=%s:channels=%d:channel_layout=0x%"PRIx64,
+               player.audio_samplerate, av_get_sample_fmt_name(player.audio_format),
+               player.audio_channels, player.audio_channel_layout);
+    av_log(NULL, AV_LOG_ERROR, "audio filter src:%s\n", args);
+
+    ret = avfilter_graph_create_filter(&player.src_audio_filter, abuffersrc, "in", args, NULL, player.audio_graph);
+    if (ret < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Cannot create audio buffer source\n");
+        goto end;
+    }
+
+    /* buffer audio sink: to terminate the filter chain. */
+    ret = avfilter_graph_create_filter(&player.sink_audio_filter, abuffersink, "out", NULL, NULL, player.audio_graph);
+    if (ret < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Cannot create audio buffer sink\n");
+        goto end;
+    }
+    if ((ret = av_opt_set_int_list(player.sink_audio_filter, "channel_layouts", out_channel_layouts, -1, AV_OPT_SEARCH_CHILDREN)) < 0)
+        goto end;
+    if ((ret = av_opt_set_int_list(player.sink_audio_filter, "channel_counts", out_channels, -1, AV_OPT_SEARCH_CHILDREN)) < 0)
+        goto end;
+    if ((ret = av_opt_set_int_list(player.sink_audio_filter, "sample_rates", out_sample_rates, -1, AV_OPT_SEARCH_CHILDREN)) < 0)
+        goto end;
+    if ((ret = av_opt_set_int_list(player.sink_audio_filter, "sample_fmts", out_sample_fmts, -1, AV_OPT_SEARCH_CHILDREN)) < 0)
+        goto end;
+    if ((ret = avfilter_link(player.src_audio_filter, 0, player.sink_audio_filter, 0)) < 0)
+        goto end;
+
+    if ((ret = avfilter_graph_config(player.audio_graph, NULL)) < 0)
+        goto end;
+
+end:
+	 if (ret < 0)
+        avfilter_graph_free(player.audio_graph);
+    return ret;
+}
+
 static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
-	if (0 == size_pcm_played) {
-        pthread_mutex_lock(&pcm_buffer_lock);
-    }
-	//memcpy(buffer, pcm_buffer + size_pcm_played, len);
-	SDL_MixAudioFormat(buffer, pcm_buffer + size_pcm_played, AUDIO_S16SYS, 4096, SDL_MIX_MAXVOLUME);
-	size_pcm_played += len;
-    av_log(NULL, AV_LOG_ERROR, "%s, size pcm played:%d\n", __func__, size_pcm_played);
-	if (8192 == size_pcm_played) {
-		size_pcm_played = 0;
-	    pthread_mutex_unlock(&pcm_buffer_lock);
-    }
+    pthread_cond_signal(&pcm_cond);
+	SDL_memset(buffer, 0, len);
+	SDL_MixAudio(buffer, (Uint8 *)pcm_buffer, len, SDL_MIX_MAXVOLUME);
+    av_log(NULL, AV_LOG_ERROR, "%s, size pcm played:%d\n", __func__, len);
 }
 
 
 static int create_video_render(int width, int height, int pixel_format)
 {
-    SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO);
+    SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_TIMER);
     
     window = SDL_CreateWindow("test", 0, 0, width, height, SDL_WINDOW_RESIZABLE);
     sdlRenderer = SDL_CreateRenderer(window, -1, 0);
@@ -158,8 +221,8 @@ static int create_video_render(int width, int height, int pixel_format)
 
 static int create_audio_render(int channels, int samplerate, int format) {
     SDL_AudioSpec request_params, response_params;
-	request_params.channels = channels;
-    request_params.freq = samplerate;
+    request_params.channels = 2;
+    request_params.freq = 44100;
     if (request_params.freq <= 0 || request_params.channels <= 0) {
         av_log(NULL, AV_LOG_ERROR, "Invalid sample rate or channel count!\n");
         return -1;
@@ -170,14 +233,12 @@ static int create_audio_render(int channels, int samplerate, int format) {
     request_params.callback = fill_pcm_data;
     request_params.userdata = NULL;
 
-    audio_render = SDL_OpenAudioDevice(NULL, 0, &request_params, &response_params, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE);
-    if (audio_render) {
-        av_log(NULL, AV_LOG_ERROR, "audio render info:\n");
-        av_log(NULL, AV_LOG_ERROR, "\t\trequest(channels:%d, sample:%d, format:%d)\n", request_params.channels, request_params.freq, request_params.format);
-        av_log(NULL, AV_LOG_ERROR, "\t\tresponse(channels:%d, sample:%d, format:%d)\n", response_params.channels, response_params.freq, response_params.format);
+    if (SDL_OpenAudio(&request_params, NULL)) {
+        av_log(NULL, AV_LOG_ERROR, "open audio failed\n");
+        return -1;
     }
-    SDL_PauseAudioDevice(audio_render, 0);
-	return 0;
+    SDL_PauseAudio(0);
+    return 0;
 }
 
 
@@ -220,14 +281,14 @@ static int open_audio_decoder(AVFormatContext* context) {
         player.audio_samplerate = context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->sample_rate;
         player.audio_channels = context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->channels;
         player.audio_format = context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->format;
-	
+        player.audio_channel_layout = context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->channel_layout;
         avcodec_parameters_to_context(player.acodec_context, context->streams[AVMEDIA_TYPE_AUDIO]->codecpar);
     }
     ret = avcodec_open2(player.acodec_context, NULL, NULL);
     if (0 == ret) {
         av_log(player.context, AV_LOG_ERROR, "%s, open decoder ==%s== success\n", __func__, pCodec->name);
-        av_log(player.context , AV_LOG_ERROR, "audio_info (channels:%d, samplerate:%d, format:%d)\n", 
-             player.audio_channels, player.audio_samplerate, player.audio_format);
+        av_log(player.context , AV_LOG_ERROR, "audio_info (channels:%d, samplerate:%d, format:%d, channel_layout:0x%x)\n", 
+             player.audio_channels, player.audio_samplerate, player.audio_format, player.audio_channel_layout);
     }
 fail:
 	return ret;
@@ -262,7 +323,8 @@ static int streams_open(AVFormatContext **context, const char*name) {
     if (ret < 0) {
         av_log(context, AV_LOG_ERROR, "%s, open audio decoder failed\n", __func__);
     }
-	
+
+    init_audio_filter();
     return ret;
 }
 
@@ -302,12 +364,14 @@ static int render_video_frame(AVFrame* frame) {
 static void main_threadloop(AVFormatContext* context) {
     int ret = -1;
     AVFrame *video_frame = NULL;
-	AVFrame *audio_frame = NULL;
+    AVFrame *audio_frame = NULL;
+    AVFrame *filter_audio_frame = NULL;
     AVPacket pkt;
-	
+
     video_frame = av_frame_alloc();
-	audio_frame = av_frame_alloc();
-    while (video_frame != NULL && audio_frame != NULL) {
+    audio_frame = av_frame_alloc();
+    filter_audio_frame = av_frame_alloc();
+    while (video_frame != NULL && audio_frame != NULL && filter_audio_frame != NULL) {
         int read_ret = av_read_frame(player.context, &pkt);
         if (read_ret < 0) {
             av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", ret);
@@ -320,21 +384,38 @@ static void main_threadloop(AVFormatContext* context) {
             if (ret_decoder >= 0) {
                 render_video_frame(video_frame);
                 av_frame_unref(video_frame);
-                usleep(40 * 1000);
             }
         } 
         if (pkt.stream_index == AVMEDIA_TYPE_AUDIO) {
             int ret_send_pkt = avcodec_send_packet(player.acodec_context, &pkt);
             int ret_decoder = avcodec_receive_frame(player.acodec_context, audio_frame);
-			if (ret_decoder >= 0 ) {
-                av_log(NULL, AV_LOG_ERROR, "pcm size:%d, sample:%d, format:%d, channel_layout:%d\n", audio_frame->linesize[0], 
-					audio_frame->sample_rate, audio_frame->format, audio_frame->channel_layout);
-                pthread_mutex_lock(&pcm_buffer_lock);				
-				memcpy(pcm_buffer, audio_frame->data[0], audio_frame->linesize[0]);
-				dump_audio(pcm_buffer, audio_frame->linesize[0]);
-				pthread_mutex_unlock(&pcm_buffer_lock);
-				av_frame_unref(audio_frame);
-		    }
+            if (ret_decoder >= 0 ) {
+                if ((ret = av_buffersrc_add_frame_flags(player.src_audio_filter, audio_frame, AV_BUFFERSRC_FLAG_KEEP_REF)) < 0) {
+                    av_log(NULL, AV_LOG_ERROR, "send frame to src audio filter failed\n");
+                    goto go_on;
+                }
+                while (1) {
+                    ret = av_buffersink_get_frame(player.sink_audio_filter, filter_audio_frame);
+                    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                        //av_log(NULL, AV_LOG_ERROR, "get filterd audio frame failed, go on\n");
+                        goto go_on;
+                    }
+                    if (ret == 0) {
+                        pthread_mutex_lock(&pcm_buffer_lock);
+                        pthread_cond_wait(&pcm_cond, &pcm_buffer_lock);
+                        int size_audio_sample = 2 * filter_audio_frame->nb_samples * av_get_channel_layout_nb_channels(filter_audio_frame->channel_layout);
+                        av_log(NULL, AV_LOG_ERROR, "get audio samples %d bytes from audio filter\n", size_audio_sample);
+                        memcpy(pcm_buffer, filter_audio_frame->data[0], size_audio_sample);
+                        pthread_mutex_unlock(&pcm_buffer_lock);
+                    } else {
+                        av_log(NULL, AV_LOG_ERROR, "get filterd audio frame failed\n");
+                        break;
+                    }
+                }
+go_on:
+                av_frame_unref(filter_audio_frame);
+                av_frame_unref(audio_frame);
+            }
         }
         av_packet_unref(&pkt);
     }
@@ -365,7 +446,6 @@ int main(int argc, char* argv[])
 
     av_register_all();
 
-
     ret = streams_open(&player.context, file_name);
     if (ret < 0) {
         av_log(NULL, AV_LOG_ERROR, "====open %s failed, goto fail\n", file_name);
@@ -374,7 +454,8 @@ int main(int argc, char* argv[])
     av_dump_format(player.context, 0, file_name, 0);
 
 
-    pthread_mutex_init(&pcm_buffer_lock, NULL); 
+    pthread_mutex_init(&pcm_buffer_lock, NULL);
+	pthread_cond_init(&pcm_cond, NULL);
     create_video_render(player.video_width, player.video_height, SDL_PIXELFORMAT_IYUV);
 
     create_audio_render(player.audio_channels, player.audio_samplerate, player.audio_format);
