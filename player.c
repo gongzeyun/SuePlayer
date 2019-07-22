@@ -99,6 +99,9 @@ typedef struct AVPlayer {
     SueFrameRingQueue audio_frames_queue;
 
     int is_aplay_end;
+    int pos_abuffer_read;
+    int pos_abuffer_tail;
+    AVFrame *aframe_playing;
 }AVPlayer;
 
 
@@ -436,18 +439,29 @@ end:
 }
 
 static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
-    AVFrame *frame = av_frame_alloc();
-    if (frame) {
-        int ret = frame_queue_get(&player.audio_frames_queue, frame);
-        if (ret == 0) {
-            int size_audio_sample = 2 * frame->nb_samples * av_get_channel_layout_nb_channels(frame->channel_layout);
-            SDL_memset(buffer, 0, len);
-            SDL_MixAudio(buffer, frame->data[0], len, SDL_MIX_MAXVOLUME);
-        } else {
-            player.is_aplay_end = 1;
-            SDL_memset(buffer, 0, len);
+    int data_length = 0;
+    int length_read = 0;
+    if (player.aframe_playing) {
+        SDL_memset(buffer, 0, len);
+        while (len > 0) {
+            int ret;
+            if (player.pos_abuffer_read >= player.pos_abuffer_tail) {
+                ret = frame_queue_get(&player.audio_frames_queue, player.aframe_playing);
+                if (ret == 0) {
+                    player.pos_abuffer_read = 0;
+                    player.pos_abuffer_tail = 2 * player.aframe_playing->nb_samples * av_get_channel_layout_nb_channels(player.aframe_playing->channel_layout);;
+                } else {
+                    player.is_aplay_end = 1;
+                    SDL_memset(buffer, 0, len);
+                }
+            }
+            data_length = player.pos_abuffer_tail - player.pos_abuffer_read;
+            length_read = data_length > len ? len : data_length;
+            SDL_MixAudio(buffer, player.aframe_playing->data[0] + player.pos_abuffer_read, length_read, SDL_MIX_MAXVOLUME);
+            buffer += length_read;
+            player.pos_abuffer_read += length_read;
+            len -= length_read;
         }
-        av_frame_free(&frame);
     }
 }
 
@@ -564,7 +578,7 @@ static int audio_decoder_threadloop() {
                 }
                 if (ret == 0) {
                     int size_audio_sample = 2 * filter_audio_frame->nb_samples * av_get_channel_layout_nb_channels(filter_audio_frame->channel_layout);
-                    //av_log(NULL, AV_LOG_ERROR, "get audio samples %d bytes from audio filter\n", size_audio_sample);
+                    av_log(NULL, AV_LOG_ERROR, "get audio samples %d bytes from audio filter\n", size_audio_sample);
                     dump_audio(filter_audio_frame->data[0], size_audio_sample);
                     frame_queue_put(&player.audio_frames_queue, filter_audio_frame);
                     av_frame_unref(filter_audio_frame);
@@ -587,6 +601,11 @@ go_on:
 static int streams_open(AVFormatContext **context, const char*name) {
     int ret;
     player.is_aplay_end = 0;
+    if (!player.aframe_playing) {
+        player.aframe_playing = av_frame_alloc();
+    }
+    player.pos_abuffer_read = 0;
+    player.pos_abuffer_tail = 0;
     ret = avformat_open_input(context, name, NULL, NULL);
     if (ret < 0) {
         av_log(NULL, AV_LOG_ERROR, "%s, open %s failed!!!!\n", __func__, name);
@@ -652,7 +671,8 @@ static int streams_close() {
     if (player.context != NULL) {
         avformat_close_input(&player.context);
     }
-
+    SDL_CloseAudio();
+    av_frame_free(player.aframe_playing);
     return 0;
 }
 
