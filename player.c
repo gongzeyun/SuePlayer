@@ -235,6 +235,7 @@ static int frame_queue_get(SueFrameRingQueue* frame_queue, AVFrame* frame) {
     ret = 0;
 exit:
     pthread_mutex_unlock(&(frame_queue->ring_queue_lock));
+    //av_log(NULL, AV_LOG_ERROR, "%s exit, ret:%d\n", __func__, ret);
 	return ret;
 }
 static int packet_queue_init(PacketQueue *queue) {
@@ -453,6 +454,7 @@ static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
                 } else {
                     player.is_aplay_end = 1;
                     SDL_memset(buffer, 0, len);
+                    return;
                 }
             }
             data_length = player.pos_abuffer_tail - player.pos_abuffer_read;
@@ -578,7 +580,7 @@ static int audio_decoder_threadloop() {
                 }
                 if (ret == 0) {
                     int size_audio_sample = 2 * filter_audio_frame->nb_samples * av_get_channel_layout_nb_channels(filter_audio_frame->channel_layout);
-                    av_log(NULL, AV_LOG_ERROR, "get audio samples %d bytes from audio filter\n", size_audio_sample);
+                    //av_log(NULL, AV_LOG_ERROR, "get audio samples %d bytes from audio filter\n", size_audio_sample);
                     dump_audio(filter_audio_frame->data[0], size_audio_sample);
                     frame_queue_put(&player.audio_frames_queue, filter_audio_frame);
                     av_frame_unref(filter_audio_frame);
@@ -662,7 +664,7 @@ static int streams_close() {
     while (!player.is_aplay_end){
         usleep(10 * 1000);
     }
-    //SDL_CloseAudio();
+    SDL_CloseAudio();
     if (player.vcodec_context != NULL) {
         avcodec_close(player.vcodec_context);
         avcodec_free_context(&player.vcodec_context);
@@ -671,8 +673,7 @@ static int streams_close() {
     if (player.context != NULL) {
         avformat_close_input(&player.context);
     }
-    SDL_CloseAudio();
-    av_frame_free(player.aframe_playing);
+    av_frame_free(&player.aframe_playing);
     return 0;
 }
 
@@ -721,7 +722,7 @@ static void main_threadloop(AVFormatContext* context) {
             packet_queue_put(&player.audio_pkts_queue, &pkt);
         }
     }
-    av_frame_free(video_frame);
+    av_frame_free(&video_frame);
     av_log(NULL, AV_LOG_ERROR, "main thread exit success\n");
     return;
 }
