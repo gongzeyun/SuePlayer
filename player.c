@@ -87,6 +87,7 @@ typedef struct AVPlayer {
     SDL_Thread* main_thread;
     SDL_Thread* video_refresh;
     SDL_Thread* audio_decoder_thread;
+    SDL_Thread* video_decoder_thread;
 
     AVFilterContext *src_audio_filter;
     AVFilterContext *sink_audio_filter;
@@ -439,6 +440,46 @@ end:
     return ret;
 }
 
+static int render_video_frame(AVFrame* frame) {
+    SDL_Event event;
+	if (frame) {
+        SDL_PollEvent(&event);
+	    SDL_UpdateYUVTexture(sdlTexture, NULL, frame->data[0], frame->linesize[0],
+	                              frame->data[1], frame->linesize[1],
+	                              frame->data[2], frame->linesize[2]);
+	    SDL_Rect sdlRect;
+	    sdlRect.x = 0;
+	    sdlRect.y = 0;
+	    sdlRect.w = player.video_width;
+	    sdlRect.h = player.video_height;
+	    SDL_RenderClear(sdlRenderer);
+	    SDL_RenderCopy(sdlRenderer, sdlTexture, NULL, &sdlRect);
+	    SDL_RenderPresent(sdlRenderer);
+    }
+}
+
+static void video_refresh() {
+    int ret;
+    AVFrame* frame_refesh = av_frame_alloc();
+    if (!frame_refesh) {
+        return;
+    }
+    for (;;) {
+        ret = frame_queue_get(&player.video_frames_queue, frame_refesh);
+        if (ret == 0) {
+            render_video_frame(frame_refesh);
+            av_frame_unref(frame_refesh);
+        } else {
+            break;
+        }
+		usleep(40 * 1000);
+    }
+
+    av_frame_free(&frame_refesh);
+    av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
+}
+
+
 static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
     int data_length = 0;
     int length_read = 0;
@@ -552,11 +593,42 @@ fail:
 	return ret;
 }
 
+static int video_decoder_threadloop() {
+    AVPacket pkt;
+    int ret;
+    AVFrame* video_frame = av_frame_alloc();
+    if (!video_frame) {
+        return -1;
+    }
+    for (;;) {
+        ret = packet_queue_get(&player.video_pkts_queue, &pkt);
+        if (-1 == ret) {
+            av_packet_unref(&pkt);
+            av_frame_unref(video_frame);
+            break;
+        }
+        int ret_send_pkt = avcodec_send_packet(player.vcodec_context, &pkt);
+        int ret_decoder = avcodec_receive_frame(player.vcodec_context, video_frame);
+        if (ret_decoder >= 0) {
+            frame_queue_put(&player.video_frames_queue, video_frame);
+            av_frame_unref(video_frame);
+        }
+        av_packet_unref(&pkt);
+    }
+
+    av_frame_free(&video_frame);
+    av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
+}
+
+
 static int audio_decoder_threadloop() {
     AVPacket pkt;
     int ret;
     AVFrame* audio_frame = av_frame_alloc();
     AVFrame* filter_audio_frame = av_frame_alloc();
+    if (!audio_frame || !filter_audio_frame) {
+        return -1;
+    }
     for(;;) {
         ret = packet_queue_get(&player.audio_pkts_queue, &pkt);
         if (-1 == ret) {
@@ -630,6 +702,10 @@ static int streams_open(AVFormatContext **context, const char*name) {
         avformat_close_input(*context);
         return ret;
     }
+    packet_queue_init(&player.video_pkts_queue);
+    frame_queue_init(&player.video_frames_queue);
+    player.video_decoder_thread	= SDL_CreateThread(video_decoder_threadloop, "video_decoder_threadloop", player.context);
+    player.video_refresh = SDL_CreateThread(video_refresh, "video_refresh", player.context);
 
 	ret = open_audio_decoder(*context);
     if (ret < 0) {
@@ -639,21 +715,27 @@ static int streams_open(AVFormatContext **context, const char*name) {
     init_audio_filter();
     frame_queue_init(&player.audio_frames_queue);
     player.audio_decoder_thread	= SDL_CreateThread(audio_decoder_threadloop, "audio_decoder_threadloop", player.context);
+
     return ret;
 }
 
-static int streams_close() {
-    /* release audio pks queue */
+static void exit_packets_queue() {
+     /* release audio pks queue */
     player.audio_pkts_queue.abort = 1;
     av_log(NULL, AV_LOG_ERROR, "set audio queue abort flag\n");
     pthread_mutex_lock(&(player.audio_pkts_queue.queue_lock));
     pthread_cond_signal(&(player.audio_pkts_queue.queue_cond));
     pthread_mutex_unlock(&(player.audio_pkts_queue.queue_lock));
 
-    SDL_WaitThread(player.audio_decoder_thread, NULL);
-    release_audio_filter();
-    packet_queue_destroy(&player.audio_pkts_queue);
+    /* release video pks queue */
+    player.video_pkts_queue.abort = 1;
+    av_log(NULL, AV_LOG_ERROR, "set video queue abort flag\n");
+    pthread_mutex_lock(&(player.video_pkts_queue.queue_lock));
+    pthread_cond_signal(&(player.video_pkts_queue.queue_cond));
+    pthread_mutex_unlock(&(player.video_pkts_queue.queue_lock));
+}
 
+static void exit_frames_queue() {
     /* release audio frames queue */
     player.audio_frames_queue.abort = 1;
     pthread_mutex_lock(&(player.audio_frames_queue.ring_queue_lock));
@@ -661,10 +743,35 @@ static int streams_close() {
     pthread_cond_signal(&(player.audio_frames_queue.ring_queue_cond_consume));
     pthread_mutex_unlock(&(player.audio_frames_queue.ring_queue_lock));
 
+    /* release video frames queue */
+    player.video_frames_queue.abort = 1;
+    pthread_mutex_lock(&(player.video_frames_queue.ring_queue_lock));
+    pthread_cond_signal(&(player.video_frames_queue.ring_queue_cond_produce));
+    pthread_cond_signal(&(player.video_frames_queue.ring_queue_cond_consume));
+    pthread_mutex_unlock(&(player.video_frames_queue.ring_queue_lock));
+}
+
+
+static int streams_close() {
+	exit_packets_queue();
+    SDL_WaitThread(player.audio_decoder_thread, NULL);
+    release_audio_filter();
+    packet_queue_destroy(&player.audio_pkts_queue);
+
+	SDL_WaitThread(player.video_decoder_thread, NULL);
+    packet_queue_destroy(&player.video_pkts_queue);
+
+    exit_frames_queue();
     while (!player.is_aplay_end){
         usleep(10 * 1000);
     }
     SDL_CloseAudio();
+
+    SDL_WaitThread(player.video_refresh, NULL);
+
+    frame_queue_destroy(&player.audio_frames_queue);
+    frame_queue_destroy(&player.video_frames_queue);
+
     if (player.vcodec_context != NULL) {
         avcodec_close(player.vcodec_context);
         avcodec_free_context(&player.vcodec_context);
@@ -677,52 +784,23 @@ static int streams_close() {
     return 0;
 }
 
-static int render_video_frame(AVFrame* frame) {
-    SDL_Event event;
-	if (frame) {
-		SDL_PollEvent(&event);
-	    SDL_UpdateYUVTexture(sdlTexture, NULL, frame->data[0], frame->linesize[0],
-	                              frame->data[1], frame->linesize[1],
-	                              frame->data[2], frame->linesize[2]);
-	    SDL_Rect sdlRect;
-	    sdlRect.x = 0;  
-	    sdlRect.y = 0;  
-	    sdlRect.w = player.video_width;  
-	    sdlRect.h = player.video_height;
-	    SDL_RenderClear(sdlRenderer);
-	    SDL_RenderCopy(sdlRenderer, sdlTexture, NULL, &sdlRect);
-	    SDL_RenderPresent(sdlRenderer);
-    }
-}
-
 
 
 static void main_threadloop(AVFormatContext* context) {
-    int ret = -1;
-    AVFrame *video_frame = NULL;
     AVPacket pkt;
-
-    video_frame = av_frame_alloc();
-    while (video_frame != NULL) {
+    for(;;) {
         int read_ret = av_read_frame(player.context, &pkt);
         if (read_ret < 0) {
-            av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", ret);
+            av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", read_ret);
             break;
         }
-    
         if (pkt.stream_index == AVMEDIA_TYPE_VIDEO) {
-            int ret_send_pkt = avcodec_send_packet(player.vcodec_context, &pkt);
-            int ret_decoder = avcodec_receive_frame(player.vcodec_context, video_frame);
-            if (ret_decoder >= 0) {
-                render_video_frame(video_frame);
-                av_frame_unref(video_frame);
-            }
+            packet_queue_put(&player.video_pkts_queue, &pkt);
         } 
         if (pkt.stream_index == AVMEDIA_TYPE_AUDIO) {
             packet_queue_put(&player.audio_pkts_queue, &pkt);
         }
     }
-    av_frame_free(&video_frame);
     av_log(NULL, AV_LOG_ERROR, "main thread exit success\n");
     return;
 }
