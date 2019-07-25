@@ -67,6 +67,15 @@ typedef struct PacketQueue {
 }PacketQueue;
 
 
+typedef struct SueClock {
+    int64_t timestamp_audio_real;
+    int64_t timestamp_audio_stream;
+
+    int64_t timestamp_video_real;
+	int64_t timestamp_video_stream;
+}SueClock;
+
+
 typedef struct AVPlayer {
     VideoRender *video_render;
     AudioRender *audio_render;
@@ -103,8 +112,9 @@ typedef struct AVPlayer {
     int pos_abuffer_read;
     int pos_abuffer_tail;
     AVFrame *aframe_playing;
-}AVPlayer;
 
+    SueClock clock;
+}AVPlayer;
 
 static const struct TextureFormatEntry {
     enum AVPixelFormat format;
@@ -467,18 +477,31 @@ static void video_refresh() {
     for (;;) {
         ret = frame_queue_get(&player.video_frames_queue, frame_refesh);
         if (ret == 0) {
-            render_video_frame(frame_refesh);
+            int64_t ts_stream = frame_refesh->pts;
+            if (ts_stream == AV_NOPTS_VALUE)
+                ts_stream = frame_refesh->pkt_dts;
+            int64_t timestamp_video_stream = av_rescale_q(ts_stream,
+                                                        player.context->streams[AVMEDIA_TYPE_VIDEO]->time_base,AV_TIME_BASE_Q);
+            int64_t av_diff = timestamp_video_stream - player.clock.timestamp_audio_stream;
+
+            if (av_diff > 0) {
+                usleep(av_diff);
+                render_video_frame(frame_refesh);
+            }
             av_frame_unref(frame_refesh);
         } else {
             break;
         }
-		usleep(40 * 1000);
     }
 
     av_frame_free(&frame_refesh);
     av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
 }
 
+static void update_audio_clock(int64_t pts) {
+    int64_t timestamp_stream = av_rescale_q(pts, player.context->streams[1]->time_base, AV_TIME_BASE_Q);
+    player.clock.timestamp_audio_stream = timestamp_stream - 50000;
+}
 
 static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
     int data_length = 0;
@@ -504,6 +527,7 @@ static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
             buffer += length_read;
             player.pos_abuffer_read += length_read;
             len -= length_read;
+            update_audio_clock(player.aframe_playing->pkt_pts);
         }
     }
 }
@@ -607,9 +631,11 @@ static int video_decoder_threadloop() {
             av_frame_unref(video_frame);
             break;
         }
+        //av_log(NULL, AV_LOG_ERROR, "%s, pts:%lld, dts:%lld\n", __func__, pkt.pts, pkt.dts);
         int ret_send_pkt = avcodec_send_packet(player.vcodec_context, &pkt);
         int ret_decoder = avcodec_receive_frame(player.vcodec_context, video_frame);
         if (ret_decoder >= 0) {
+            //av_log(NULL, AV_LOG_ERROR, "%s, pts:%lld, dts:%lld\n", __func__, video_frame->pts, video_frame->pkt_dts);
             frame_queue_put(&player.video_frames_queue, video_frame);
             av_frame_unref(video_frame);
         }
@@ -680,6 +706,10 @@ static int streams_open(AVFormatContext **context, const char*name) {
     }
     player.pos_abuffer_read = 0;
     player.pos_abuffer_tail = 0;
+
+    player.clock.timestamp_audio_stream = -1;
+    player.clock.timestamp_audio_real = -1;
+    player.clock.timestamp_video_stream = -1;
     ret = avformat_open_input(context, name, NULL, NULL);
     if (ret < 0) {
         av_log(NULL, AV_LOG_ERROR, "%s, open %s failed!!!!\n", __func__, name);
@@ -692,7 +722,7 @@ static int streams_open(AVFormatContext **context, const char*name) {
         av_log(context, AV_LOG_ERROR, "%s, find stream info failed\n", __func__);
         return ret;
     }
-
+    av_log(NULL, AV_LOG_ERROR, "start time:%lld\n", (*context)->start_time);
     player.video_width = (*context)->streams[AVMEDIA_TYPE_VIDEO]->codecpar->width;
     player.video_height = (*context)->streams[AVMEDIA_TYPE_VIDEO]->codecpar->height;
 
