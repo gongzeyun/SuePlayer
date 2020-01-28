@@ -38,7 +38,7 @@ typedef struct SueFrame {
 typedef struct SueFrameRingQueue {
     SueFrame  sue_frames[NUM_FRAMES_RING_BUFFER];
     int pos_read;
-	int pos_write;
+    int pos_write;
     pthread_mutex_t ring_queue_lock;
     pthread_cond_t ring_queue_cond_produce;
     pthread_cond_t ring_queue_cond_consume;
@@ -150,7 +150,7 @@ static SDL_AudioDeviceID audio_render;
 
 static int frame_queue_init(SueFrameRingQueue* frame_queue) {
     frame_queue->pos_read = 0;
-	frame_queue->pos_write = 0;
+    frame_queue->pos_write = 0;
     frame_queue->last_operation = 0;
     frame_queue->abort = 0;
     pthread_mutex_init(&(frame_queue->ring_queue_lock), NULL);
@@ -401,12 +401,12 @@ static int init_audio_filter() {
     const AVFilter *abuffersrc  = avfilter_get_by_name("abuffer");
     const AVFilter *abuffersink = avfilter_get_by_name("abuffersink");
 
-	static const enum AVSampleFormat out_sample_fmts[2] = {AV_SAMPLE_FMT_S16, -1};
-	static const out_channels[2] = {2, -1};
+    static const enum AVSampleFormat out_sample_fmts[2] = {AV_SAMPLE_FMT_S16, -1};
+    static const out_channels[2] = {2, -1};
     static const int64_t out_channel_layouts[2] = {AV_CH_LAYOUT_STEREO, -1};
     static const int out_sample_rates[2] = {44100, -1};
 
-	player.audio_graph = avfilter_graph_alloc();
+    player.audio_graph = avfilter_graph_alloc();
     if (!player.audio_graph) {
         ret = AVERROR(ENOMEM);
         goto end;
@@ -500,10 +500,10 @@ static void video_refresh() {
 
 static void update_audio_clock(int64_t pts) {
     int64_t timestamp_stream = av_rescale_q(pts, player.context->streams[1]->time_base, AV_TIME_BASE_Q);
-    player.clock.timestamp_audio_stream = timestamp_stream - 50000;
+    player.clock.timestamp_audio_stream = timestamp_stream - 100000;
 }
 
-static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
+static void fill_pcm_data(Uint8 *buffer, int len) {
     int data_length = 0;
     int length_read = 0;
     if (player.aframe_playing) {
@@ -514,7 +514,7 @@ static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
                 ret = frame_queue_get(&player.audio_frames_queue, player.aframe_playing);
                 if (ret == 0) {
                     player.pos_abuffer_read = 0;
-                    player.pos_abuffer_tail = 2 * player.aframe_playing->nb_samples * av_get_channel_layout_nb_channels(player.aframe_playing->channel_layout);;
+                    player.pos_abuffer_tail = 2 * player.aframe_playing->nb_samples * av_get_channel_layout_nb_channels(player.aframe_playing->channel_layout);
                 } else {
                     player.is_aplay_end = 1;
                     SDL_memset(buffer, 0, len);
@@ -531,6 +531,7 @@ static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
         }
     }
 }
+
 
 static int create_video_render(int width, int height, int pixel_format)
 {
@@ -609,8 +610,8 @@ static int open_audio_decoder(AVFormatContext* context) {
     }
     ret = avcodec_open2(player.acodec_context, NULL, NULL);
     if (0 == ret) {
-        av_log(player.context, AV_LOG_ERROR, "%s, open decoder ==%s== success\n", __func__, pCodec->name);
-        av_log(player.context , AV_LOG_ERROR, "audio_info (channels:%d, samplerate:%d, format:%d, channel_layout:0x%x)\n", 
+        av_log(player.context, AV_LOG_DEBUG, "%s, open decoder [%s] success\n", __func__, pCodec->name);
+        av_log(player.context , AV_LOG_DEBUG, "audio params (channels:%d, samplerate:%d, format:%d, channel_layout:0x%x)\n", 
              player.audio_channels, player.audio_samplerate, player.audio_format, player.audio_channel_layout);
     }
 fail:
@@ -847,18 +848,18 @@ int main(int argc, char* argv[])
 {
     int ret = 0;
     if (argc < 2) {
-       av_log(NULL, AV_LOG_ERROR, "You should specify file to open");
+       av_log(NULL, AV_LOG_ERROR, "no input file\n");
        return -1;
     }
     
     const char* file_name = argv[1];
-    av_log(NULL, AV_LOG_ERROR, "====source:%s\n", file_name);
+    av_log(NULL, AV_LOG_DEBUG, "opening source:%s\n", file_name);
 
     av_register_all();
 
     ret = streams_open(&player.context, file_name);
     if (ret < 0) {
-        av_log(NULL, AV_LOG_ERROR, "====open %s failed, goto fail\n", file_name);
+        av_log(NULL, AV_LOG_ERROR, "open %s failed, goto fail\n", file_name);
 		return ret;
     }
     av_dump_format(player.context, 0, file_name, 0);
