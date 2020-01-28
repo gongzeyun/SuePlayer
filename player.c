@@ -93,10 +93,12 @@ typedef struct AVPlayer {
     int audio_channels;
     int audio_format;
     int64_t  audio_channel_layout;
+
     SDL_Thread* main_thread;
     SDL_Thread* video_refresh;
     SDL_Thread* audio_decoder_thread;
     SDL_Thread* video_decoder_thread;
+    SDL_Thread* event_thread;
 
     AVFilterContext *src_audio_filter;
     AVFilterContext *sink_audio_filter;
@@ -114,6 +116,8 @@ typedef struct AVPlayer {
     AVFrame *aframe_playing;
 
     SueClock clock;
+
+    int flag_exit;
 }AVPlayer;
 
 static const struct TextureFormatEntry {
@@ -503,7 +507,7 @@ static void update_audio_clock(int64_t pts) {
     player.clock.timestamp_audio_stream = timestamp_stream - 100000;
 }
 
-static void fill_pcm_data(Uint8 *buffer, int len) {
+static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
     int data_length = 0;
     int length_read = 0;
     if (player.aframe_playing) {
@@ -735,6 +739,7 @@ static int streams_open(AVFormatContext **context, const char*name) {
     }
     packet_queue_init(&player.video_pkts_queue);
     frame_queue_init(&player.video_frames_queue);
+
     player.video_decoder_thread	= SDL_CreateThread(video_decoder_threadloop, "video_decoder_threadloop", player.context);
     player.video_refresh = SDL_CreateThread(video_refresh, "video_refresh", player.context);
 
@@ -819,7 +824,7 @@ static int streams_close() {
 
 static void main_threadloop(AVFormatContext* context) {
     AVPacket pkt;
-    for(;;) {
+    while(!player.flag_exit) {
         int read_ret = av_read_frame(player.context, &pkt);
         if (read_ret < 0) {
             av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", read_ret);
@@ -836,12 +841,95 @@ static void main_threadloop(AVFormatContext* context) {
     return;
 }
 
+static void process_window_event(const SDL_Event * event) {
+    switch (event->window.event) {
+        case SDL_WINDOWEVENT_SHOWN:
+            SDL_Log("Window %d shown", event->window.windowID);
+            break;
+        case SDL_WINDOWEVENT_HIDDEN:
+            SDL_Log("Window %d hidden", event->window.windowID);
+            break;
+        case SDL_WINDOWEVENT_EXPOSED:
+            SDL_Log("Window %d exposed", event->window.windowID);
+            break;
+        case SDL_WINDOWEVENT_MOVED:
+            SDL_Log("Window %d moved to %d,%d",
+                    event->window.windowID, event->window.data1,
+                    event->window.data2);
+            break;
+        case SDL_WINDOWEVENT_RESIZED:
+            SDL_Log("Window %d resized to %dx%d",
+                    event->window.windowID, event->window.data1,
+                    event->window.data2);
+            break;
+        case SDL_WINDOWEVENT_SIZE_CHANGED:
+            SDL_Log("Window %d size changed to %dx%d",
+                    event->window.windowID, event->window.data1,
+                    event->window.data2);
+            break;
+        case SDL_WINDOWEVENT_MINIMIZED:
+            SDL_Log("Window %d minimized", event->window.windowID);
+            break;
+        case SDL_WINDOWEVENT_MAXIMIZED:
+            SDL_Log("Window %d maximized", event->window.windowID);
+            break;
+        case SDL_WINDOWEVENT_RESTORED:
+            SDL_Log("Window %d restored", event->window.windowID);
+            break;
+        case SDL_WINDOWEVENT_ENTER:
+            SDL_Log("Mouse entered window %d",
+                    event->window.windowID);
+            break;
+        case SDL_WINDOWEVENT_LEAVE:
+            SDL_Log("Mouse left window %d", event->window.windowID);
+            break;
+        case SDL_WINDOWEVENT_FOCUS_GAINED:
+            SDL_Log("Window %d gained keyboard focus",
+                    event->window.windowID);
+            break;
+        case SDL_WINDOWEVENT_FOCUS_LOST:
+            SDL_Log("Window %d lost keyboard focus",
+                    event->window.windowID);
+            break;
+        case SDL_WINDOWEVENT_CLOSE:
+            SDL_Log("Window %d closed", event->window.windowID);
+			exit(0);
+            break;
+#if SDL_VERSION_ATLEAST(2, 0, 5)
+        case SDL_WINDOWEVENT_TAKE_FOCUS:
+            SDL_Log("Window %d is offered a focus", event->window.windowID);
+            break;
+        case SDL_WINDOWEVENT_HIT_TEST:
+            SDL_Log("Window %d has a special hit test", event->window.windowID);
+            break;
+#endif
+        default:
+            SDL_Log("Window %d got unknown event %d",
+                    event->window.windowID, event->window.event);
+            break;
+        }
+}
 
-
-static int event_loop() {
-    while (1) {
-        usleep(100 * 1000);
+static void eventloop() {
+   SDL_Event event;
+   av_log(NULL, AV_LOG_ERROR, "event_loop enter\n");
+    while (SDL_WaitEvent(&event)) {
+        switch (event.type) {
+            case SDL_QUIT:
+                av_log(NULL, AV_LOG_ERROR, "SDL Quit event");
+                break;
+            case SDL_KEYDOWN:
+               av_log(NULL, AV_LOG_ERROR, "SDL Key event");
+               break;
+            case SDL_WINDOWEVENT:
+                av_log(NULL, AV_LOG_ERROR, "SDL Window event");
+                process_window_event(&event);
+                break;
+            default:
+                break;
+        };
     }
+    av_log(NULL, AV_LOG_ERROR, "event_loop exit\n");
 }
 
 int main(int argc, char* argv[])
@@ -867,6 +955,8 @@ int main(int argc, char* argv[])
     create_video_render(player.video_width, player.video_height, SDL_PIXELFORMAT_IYUV);
 
     create_audio_render(player.audio_channels, player.audio_samplerate, player.audio_format);
+
+    player.event_thread = SDL_CreateThread(eventloop, "event_loop", NULL);
     //create main thread
     player.main_thread = SDL_CreateThread(main_threadloop, "main_threadloop", player.context);
     SDL_WaitThread(player.main_thread, NULL);
