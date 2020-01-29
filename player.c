@@ -215,13 +215,14 @@ static int frame_queue_get(SueFrameRingQueue* frame_queue, AVFrame* frame) {
     int ret = -1;
     int read_space;
     while (!frame_queue->abort) {
+        ret = -1;
         pthread_mutex_lock(&(frame_queue->ring_queue_lock));
         if (frame_queue->pos_read == frame_queue->pos_write && frame_queue->last_operation == 1) {
             read_space = NUM_FRAMES_RING_BUFFER;
         } else {
             read_space = (frame_queue->pos_write - frame_queue->pos_read + NUM_FRAMES_RING_BUFFER) % (NUM_FRAMES_RING_BUFFER);
         }
-        //av_log(NULL, AV_LOG_ERROR, "====read, pos_write:%d, pos_read:%d, read_space:%d\n", frame_queue->pos_write, frame_queue->pos_read, read_space);
+        //av_log(NULL, AV_LOG_ERROR, "====read, pos_write:%d, pos_read:%d, read_space:%d, abort:%d\n", frame_queue->pos_write, frame_queue->pos_read, read_space, frame_queue->abort);
         if (read_space < 1) {
             pthread_mutex_unlock(&(frame_queue->ring_queue_lock));
             usleep(5 * 1000);
@@ -746,29 +747,27 @@ static void signal_decoder_thread_exit() {
      /* release audio pks queue */
     player.audio_pkts_queue.abort = 1;
     av_log(NULL, AV_LOG_ERROR, "set audio queue abort flag\n");
-    pthread_mutex_lock(&(player.audio_pkts_queue.queue_lock));
-    pthread_mutex_unlock(&(player.audio_pkts_queue.queue_lock));
 
     /* release video pks queue */
     player.video_pkts_queue.abort = 1;
     av_log(NULL, AV_LOG_ERROR, "set video queue abort flag\n");
-    pthread_mutex_lock(&(player.video_pkts_queue.queue_lock));
-    pthread_mutex_unlock(&(player.video_pkts_queue.queue_lock));
 }
 
 static void signal_render_thread_exit() {
     /* release audio frames queue */
     player.audio_frames_queue.abort = 1;
+    av_log(NULL, AV_LOG_ERROR, "set audio frames queue abort flag\n");
 
     /* release video frames queue */
     player.video_frames_queue.abort = 1;
+    av_log(NULL, AV_LOG_ERROR, "set video frames queue abort flag\n");
 }
 
 
 static int streams_close() {
-    SDL_CloseAudio();
     signal_render_thread_exit();
     SDL_WaitThread(player.video_refresh, NULL);
+    SDL_CloseAudio();
 
     signal_decoder_thread_exit();
     SDL_WaitThread(player.audio_decoder_thread, NULL);
@@ -798,11 +797,11 @@ static int streams_close() {
 
 static void main_threadloop(AVFormatContext* context) {
     AVPacket pkt;
-    while(!player.flag_exit) {
+    while(1) {
         int read_ret = av_read_frame(player.context, &pkt);
         if (read_ret < 0) {
             av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", read_ret);
-            break;
+            usleep(10 * 1000);
         }
         if (pkt.stream_index == AVMEDIA_TYPE_VIDEO) {
             packet_queue_put(&player.video_pkts_queue, &pkt);
@@ -917,7 +916,7 @@ int main(int argc, char* argv[])
        return -1;
     }
 
-    av_log_set_level(AV_LOG_DEBUG);
+    //av_log_set_level(AV_LOG_DEBUG);
     const char* file_name = argv[1];
     av_log(NULL, AV_LOG_DEBUG, "opening source:%s\n", file_name);
 
@@ -934,11 +933,10 @@ int main(int argc, char* argv[])
 
     create_audio_render(player.audio_channels, player.audio_samplerate, player.audio_format);
 
-    //player.event_thread = SDL_CreateThread(eventloop, "event_loop", NULL);
+    player.event_thread = SDL_CreateThread(eventloop, "event_loop", NULL);
     //create main thread
     player.main_thread = SDL_CreateThread(main_threadloop, "main_threadloop", player.context);
     SDL_WaitThread(player.main_thread, NULL);
-    eventloop();
     //streams_close();
     return 0;
 }
