@@ -16,7 +16,7 @@ static int file_index = 0;
 #define SDL_AUDIO_MAX_CALLBACKS_PER_SEC 30
 
 #define NUM_FRAMES_RING_BUFFER   16
-typedef struct VideoRender{
+typedef struct VideoSurface{
 	SDL_Window* window;
 	SDL_Renderer* render;
 	SDL_Texture* texture;
@@ -25,7 +25,7 @@ typedef struct VideoRender{
 	int y;
 	int width;
 	int height;
-}VideoRender;
+}VideoSurface;
 
 typedef struct AudioRender {
 	
@@ -77,7 +77,7 @@ typedef struct SueClock {
 
 
 typedef struct AVPlayer {
-    VideoRender *video_render;
+    VideoSurface video_surface;
     AudioRender *audio_render;
 
     AVFormatContext *context;
@@ -147,9 +147,6 @@ static const struct TextureFormatEntry {
 };
 
 AVPlayer player;
-SDL_Window* window;
-SDL_Renderer* sdlRenderer;
-SDL_Texture* sdlTexture;
 static SDL_AudioDeviceID audio_render;
 
 static int frame_queue_init(SueFrameRingQueue* frame_queue) {
@@ -458,17 +455,17 @@ static int render_video_frame(AVFrame* frame) {
     SDL_Event event;
 	if (frame) {
         SDL_PollEvent(&event);
-	    SDL_UpdateYUVTexture(sdlTexture, NULL, frame->data[0], frame->linesize[0],
+	    SDL_UpdateYUVTexture(player.video_surface.texture, NULL, frame->data[0], frame->linesize[0],
 	                              frame->data[1], frame->linesize[1],
 	                              frame->data[2], frame->linesize[2]);
 	    SDL_Rect sdlRect;
 	    sdlRect.x = 0;
 	    sdlRect.y = 0;
-	    sdlRect.w = player.video_width;
-	    sdlRect.h = player.video_height;
-	    SDL_RenderClear(sdlRenderer);
-	    SDL_RenderCopy(sdlRenderer, sdlTexture, NULL, &sdlRect);
-	    SDL_RenderPresent(sdlRenderer);
+	    sdlRect.w = player.video_surface.width;
+	    sdlRect.h = player.video_surface.height;
+	    SDL_RenderClear(player.video_surface.render);
+	    SDL_RenderCopy(player.video_surface.render, player.video_surface.texture, NULL, &sdlRect);
+	    SDL_RenderPresent(player.video_surface.render);
     }
 }
 
@@ -541,9 +538,9 @@ static int create_video_render(int width, int height, int pixel_format)
 {
     SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_TIMER);
     
-    window = SDL_CreateWindow("test", 0, 0, width, height, SDL_WINDOW_RESIZABLE);
-    sdlRenderer = SDL_CreateRenderer(window, -1, 0);
-    sdlTexture = SDL_CreateTexture(sdlRenderer, pixel_format, SDL_TEXTUREACCESS_STREAMING, width, height);
+    player.video_surface.window = SDL_CreateWindow("test", 0, 0, width, height, SDL_WINDOW_RESIZABLE);
+    player.video_surface.render = SDL_CreateRenderer(player.video_surface.window, -1, 0);
+    player.video_surface.texture = SDL_CreateTexture(player.video_surface.render, pixel_format, SDL_TEXTUREACCESS_STREAMING, width, height);
 
 }
 
@@ -731,6 +728,9 @@ static int streams_open(AVFormatContext **context, const char*name) {
     player.video_width = (*context)->streams[AVMEDIA_TYPE_VIDEO]->codecpar->width;
     player.video_height = (*context)->streams[AVMEDIA_TYPE_VIDEO]->codecpar->height;
 
+    player.video_surface.width = player.video_width;
+    player.video_surface.height = player.video_height;
+
     ret = open_video_decoder(*context);
     if (ret < 0) {
         av_log(context, AV_LOG_ERROR, "%s, open video decoder failed\n", __func__);
@@ -861,6 +861,8 @@ static void process_window_event(const SDL_Event * event) {
             SDL_Log("Window %d resized to %dx%d",
                     event->window.windowID, event->window.data1,
                     event->window.data2);
+            player.video_surface.width  = event->window.data1;
+            player.video_surface.height  = event->window.data2;
             break;
         case SDL_WINDOWEVENT_SIZE_CHANGED:
             SDL_Log("Window %d size changed to %dx%d",
@@ -939,7 +941,8 @@ int main(int argc, char* argv[])
        av_log(NULL, AV_LOG_ERROR, "no input file\n");
        return -1;
     }
-    
+
+    av_log_set_level(AV_LOG_DEBUG);
     const char* file_name = argv[1];
     av_log(NULL, AV_LOG_DEBUG, "opening source:%s\n", file_name);
 
