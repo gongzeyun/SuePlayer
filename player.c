@@ -17,18 +17,18 @@ static int file_index = 0;
 
 #define NUM_FRAMES_RING_BUFFER   16
 typedef struct VideoSurface{
-	SDL_Window* window;
-	SDL_Renderer* render;
-	SDL_Texture* texture;
-	int format;
-	int x;
-	int y;
-	int width;
-	int height;
+    SDL_Window* window;
+    SDL_Renderer* render;
+    SDL_Texture* texture;
+    int format;
+    int x;
+    int y;
+    int width;
+    int height;
 }VideoSurface;
 
 typedef struct AudioRender {
-	
+
 }AudioRender;
 
 typedef struct SueFrame {
@@ -40,8 +40,6 @@ typedef struct SueFrameRingQueue {
     int pos_read;
     int pos_write;
     pthread_mutex_t ring_queue_lock;
-    pthread_cond_t ring_queue_cond_produce;
-    pthread_cond_t ring_queue_cond_consume;
 
     int last_operation;/* 0:read, 1:write */
     int abort;
@@ -61,7 +59,6 @@ typedef struct PacketQueue {
     int serial;
     int64_t duration;
     pthread_mutex_t queue_lock;
-    pthread_cond_t queue_cond;
 
     int abort;
 }PacketQueue;
@@ -72,7 +69,7 @@ typedef struct SueClock {
     int64_t timestamp_audio_stream;
 
     int64_t timestamp_video_real;
-	int64_t timestamp_video_stream;
+    int64_t timestamp_video_stream;
 }SueClock;
 
 
@@ -149,14 +146,14 @@ static const struct TextureFormatEntry {
 AVPlayer player;
 static SDL_AudioDeviceID audio_render;
 
+static int streams_close();
+
 static int frame_queue_init(SueFrameRingQueue* frame_queue) {
     frame_queue->pos_read = 0;
     frame_queue->pos_write = 0;
     frame_queue->last_operation = 0;
     frame_queue->abort = 0;
     pthread_mutex_init(&(frame_queue->ring_queue_lock), NULL);
-    pthread_cond_init(&(frame_queue->ring_queue_cond_produce), NULL);
-    pthread_cond_init(&(frame_queue->ring_queue_cond_consume), NULL);
     for (int i = 0; i < NUM_FRAMES_RING_BUFFER; i++) {
         if (!(frame_queue->sue_frames[i].frame = av_frame_alloc()))
             return AVERROR(ENOMEM);
@@ -167,20 +164,18 @@ static int frame_queue_init(SueFrameRingQueue* frame_queue) {
 
 static int frame_queue_destroy(SueFrameRingQueue* frame_queue) {
     for (int i = 0; i < NUM_FRAMES_RING_BUFFER; i++) {
+        av_frame_unref(frame_queue->sue_frames[i].frame);
         av_frame_free(frame_queue->sue_frames[i].frame);
     }
     pthread_mutex_destroy(&(frame_queue->ring_queue_lock), NULL);
-    pthread_cond_destroy(&(frame_queue->ring_queue_cond_produce), NULL);
-    pthread_cond_destroy(&(frame_queue->ring_queue_cond_consume), NULL);
 }
 
 static int frame_queue_put(SueFrameRingQueue* frame_queue, AVFrame* frame) {
-    pthread_mutex_lock(&(frame_queue->ring_queue_lock));
+    int ret = -1;
+
     int write_space = 0;
-    if (frame_queue->abort) {
-        goto exit;
-    }
-    do {
+    while (!frame_queue->abort) {
+        pthread_mutex_lock(&(frame_queue->ring_queue_lock));
         if (frame_queue->pos_read == frame_queue->pos_write && frame_queue->last_operation == 0) {
             write_space = NUM_FRAMES_RING_BUFFER;
         } else {
@@ -189,66 +184,64 @@ static int frame_queue_put(SueFrameRingQueue* frame_queue, AVFrame* frame) {
         //av_log(NULL, AV_LOG_ERROR, "====write, pos_read:%d, pos_write:%d, last_operation:%d, write_space:%d\n",
         //         frame_queue->pos_read, frame_queue->pos_write, frame_queue->last_operation, write_space);
         if (write_space < 1) {
-            pthread_cond_wait(&(frame_queue->ring_queue_cond_consume), &(frame_queue->ring_queue_lock));
+            pthread_mutex_unlock(&(frame_queue->ring_queue_lock));
+            usleep(5);
+            continue;
         }
-    }while (write_space < 1);
-    if (write_space < 1) {
-        /* only match when queue is aborting */
-        goto exit;
-    }
-    av_frame_unref(frame_queue->sue_frames[frame_queue->pos_write].frame);
-    av_frame_move_ref(frame_queue->sue_frames[frame_queue->pos_write].frame, frame);
+        av_frame_unref(frame_queue->sue_frames[frame_queue->pos_write].frame);
+        av_frame_move_ref(frame_queue->sue_frames[frame_queue->pos_write].frame, frame);
 
-    if (frame_queue->pos_read == -1) {
-        frame_queue->pos_read = 0;
+        if (frame_queue->pos_read == -1) {
+            frame_queue->pos_read = 0;
+        }
+
+        int tmp_pos_write = frame_queue->pos_write;
+        frame_queue->pos_write++;
+        frame_queue->pos_write %= NUM_FRAMES_RING_BUFFER;
+        frame_queue->last_operation = 1;
+       //av_log(NULL, AV_LOG_ERROR, "====write frame(pts:%lld) success, write_pos:%d, next_write_pos:%d\n",
+       //       frame_queue->sue_frames[tmp_pos_write].frame->pts, tmp_pos_write, frame_queue->pos_write);
+        ret = 0;
+        break;
     }
 
-    int tmp_pos_write = frame_queue->pos_write;
-    frame_queue->pos_write++;
-    frame_queue->pos_write %= NUM_FRAMES_RING_BUFFER;
-    frame_queue->last_operation = 1;
-    //av_log(NULL, AV_LOG_ERROR, "====write frame(pts:%lld) success, write_pos:%d, next_write_pos:%d\n",
-    //       frame_queue->sue_frames[tmp_pos_write].frame->pts, tmp_pos_write, frame_queue->pos_write);
-    pthread_cond_signal(&(frame_queue->ring_queue_cond_produce));
 exit:
     pthread_mutex_unlock(&(frame_queue->ring_queue_lock));
-    return 0;
+    return ret;
 }
 
 
 static int frame_queue_get(SueFrameRingQueue* frame_queue, AVFrame* frame) {
     int ret = -1;
-    pthread_mutex_lock(&(frame_queue->ring_queue_lock));
     int read_space;
-    do {
+    while (!frame_queue->abort) {
+        pthread_mutex_lock(&(frame_queue->ring_queue_lock));
         if (frame_queue->pos_read == frame_queue->pos_write && frame_queue->last_operation == 1) {
             read_space = NUM_FRAMES_RING_BUFFER;
         } else {
             read_space = (frame_queue->pos_write - frame_queue->pos_read + NUM_FRAMES_RING_BUFFER) % (NUM_FRAMES_RING_BUFFER);
         }
         //av_log(NULL, AV_LOG_ERROR, "====read, pos_write:%d, pos_read:%d, read_space:%d\n", frame_queue->pos_write, frame_queue->pos_read, read_space);
-        if (read_space < 1 && !frame_queue->abort) {
-			pthread_cond_wait(&(frame_queue->ring_queue_cond_produce), &(frame_queue->ring_queue_lock));
+        if (read_space < 1) {
+            pthread_mutex_unlock(&(frame_queue->ring_queue_lock));
+            usleep(5 * 1000);
+            continue;
         }
-        if (read_space < 1 && frame_queue->abort) {
-            goto exit;
-        }
-    } while (read_space < 1);
-    av_frame_unref(frame);
-    av_frame_move_ref(frame, frame_queue->sue_frames[frame_queue->pos_read].frame);
-    av_frame_unref(frame_queue->sue_frames[frame_queue->pos_read].frame);
+        av_frame_unref(frame);
+        av_frame_move_ref(frame, frame_queue->sue_frames[frame_queue->pos_read].frame);
 
-    int temp_pos_read = frame_queue->pos_read;
-    frame_queue->pos_read++;
-    frame_queue->pos_read %= NUM_FRAMES_RING_BUFFER;
-    frame_queue->last_operation = 0;
-    //av_log(NULL, AV_LOG_ERROR, "====read frame(pts:%lld) success, read_pos:%d, next_read_pos:%d\n", frame->pts, temp_pos_read, frame_queue->pos_read);
-    pthread_cond_signal(&(frame_queue->ring_queue_cond_consume));
-    ret = 0;
+        int temp_pos_read = frame_queue->pos_read;
+        frame_queue->pos_read++;
+        frame_queue->pos_read %= NUM_FRAMES_RING_BUFFER;
+        frame_queue->last_operation = 0;
+        //av_log(NULL, AV_LOG_ERROR, "====read frame(pts:%lld) success, read_pos:%d, next_read_pos:%d\n", frame->pts, temp_pos_read, frame_queue->pos_read);
+        ret = 0;
+        break;
+    }
 exit:
     pthread_mutex_unlock(&(frame_queue->ring_queue_lock));
     //av_log(NULL, AV_LOG_ERROR, "%s exit, ret:%d\n", __func__, ret);
-	return ret;
+    return ret;
 }
 static int packet_queue_init(PacketQueue *queue) {
     queue->first_pkt = NULL;
@@ -259,7 +252,6 @@ static int packet_queue_init(PacketQueue *queue) {
     queue->abort = 0;
 
     pthread_mutex_init(&(queue->queue_lock), NULL);
-    pthread_cond_init(&(queue->queue_cond), NULL);
 }
 
 static int packet_queue_put(PacketQueue *queue, AVPacket *pkt) {
@@ -284,7 +276,6 @@ static int packet_queue_put(PacketQueue *queue, AVPacket *pkt) {
         queue->first_pkt = queue->last_pkt;
     }
     //av_log(NULL, AV_LOG_ERROR, "queue pkt(stream:%d, pts:%lld) success, pkt_num:%d\n", pkt->stream_index, pkt->pts, queue->num_packets);
-	pthread_cond_signal(&(queue->queue_cond));
     pthread_mutex_unlock(&(queue->queue_lock));
 
     return 0;
@@ -292,8 +283,8 @@ static int packet_queue_put(PacketQueue *queue, AVPacket *pkt) {
 
 static int packet_queue_get(PacketQueue *queue, AVPacket* pkt) {
     int ret = -1;
-    pthread_mutex_lock(&(queue->queue_lock));
-    for (;;) {
+    while (!queue->abort) {
+        pthread_mutex_lock(&(queue->queue_lock));
         if(queue->first_pkt) {
             SueAVPacket *sue_pkt = queue->first_pkt;
             *pkt = sue_pkt->pkt;
@@ -307,12 +298,9 @@ static int packet_queue_get(PacketQueue *queue, AVPacket* pkt) {
             ret = 0;
             break;
         } else {
-            if (!queue->abort) {
-                pthread_cond_wait(&(queue->queue_cond), &(queue->queue_lock));
-            } else {
-                ret = -1;
-                break;
-            }
+            pthread_mutex_unlock(&(queue->queue_lock));
+            usleep(5 * 1000);
+            continue;
         }
     }
     pthread_mutex_unlock(&(queue->queue_lock));
@@ -337,7 +325,6 @@ static void packet_queue_flush(PacketQueue *queue)
 static int packet_queue_destroy(PacketQueue *queue) {
     packet_queue_flush(queue);
     pthread_mutex_destroy(&(queue->queue_lock));
-    pthread_cond_destroy(&(queue->queue_cond));
 }
 
 int dump_frame(AVFrame* frame)
@@ -446,26 +433,26 @@ static int init_audio_filter() {
         goto end;
 
 end:
-	 if (ret < 0)
+    if (ret < 0)
         avfilter_graph_free(&player.audio_graph);
     return ret;
 }
 
 static int render_video_frame(AVFrame* frame) {
     SDL_Event event;
-	if (frame) {
+    if (frame) {
         SDL_PollEvent(&event);
-	    SDL_UpdateYUVTexture(player.video_surface.texture, NULL, frame->data[0], frame->linesize[0],
-	                              frame->data[1], frame->linesize[1],
-	                              frame->data[2], frame->linesize[2]);
-	    SDL_Rect sdlRect;
-	    sdlRect.x = 0;
-	    sdlRect.y = 0;
-	    sdlRect.w = player.video_surface.width;
-	    sdlRect.h = player.video_surface.height;
-	    SDL_RenderClear(player.video_surface.render);
-	    SDL_RenderCopy(player.video_surface.render, player.video_surface.texture, NULL, &sdlRect);
-	    SDL_RenderPresent(player.video_surface.render);
+         SDL_UpdateYUVTexture(player.video_surface.texture, NULL, frame->data[0], frame->linesize[0],
+                              frame->data[1], frame->linesize[1],
+                              frame->data[2], frame->linesize[2]);
+         SDL_Rect sdlRect;
+         sdlRect.x = 0;
+         sdlRect.y = 0;
+         sdlRect.w = player.video_surface.width;
+         sdlRect.h = player.video_surface.height;
+         SDL_RenderClear(player.video_surface.render);
+         SDL_RenderCopy(player.video_surface.render, player.video_surface.texture, NULL, &sdlRect);
+         SDL_RenderPresent(player.video_surface.render);
     }
 }
 
@@ -592,7 +579,7 @@ fail:
 
 
 static int open_audio_decoder(AVFormatContext* context) {
-	int ret = -1;
+    int ret = -1;
 
     AVCodec* pCodec = NULL;
     pCodec = avcodec_find_decoder(context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->codec_id);
@@ -616,7 +603,7 @@ static int open_audio_decoder(AVFormatContext* context) {
              player.audio_channels, player.audio_samplerate, player.audio_format, player.audio_channel_layout);
     }
 fail:
-	return ret;
+    return ret;
 }
 
 static int video_decoder_threadloop() {
@@ -740,70 +727,57 @@ static int streams_open(AVFormatContext **context, const char*name) {
     packet_queue_init(&player.video_pkts_queue);
     frame_queue_init(&player.video_frames_queue);
 
-    player.video_decoder_thread	= SDL_CreateThread(video_decoder_threadloop, "video_decoder_threadloop", player.context);
+    player.video_decoder_thread = SDL_CreateThread(video_decoder_threadloop, "video_decoder_threadloop", player.context);
     player.video_refresh = SDL_CreateThread(video_refresh, "video_refresh", player.context);
 
-	ret = open_audio_decoder(*context);
+    ret = open_audio_decoder(*context);
     if (ret < 0) {
         av_log(context, AV_LOG_ERROR, "%s, open audio decoder failed\n", __func__);
     }
     packet_queue_init(&player.audio_pkts_queue);
     init_audio_filter();
     frame_queue_init(&player.audio_frames_queue);
-    player.audio_decoder_thread	= SDL_CreateThread(audio_decoder_threadloop, "audio_decoder_threadloop", player.context);
+    player.audio_decoder_thread = SDL_CreateThread(audio_decoder_threadloop, "audio_decoder_threadloop", player.context);
 
     return ret;
 }
 
-static void exit_packets_queue() {
+static void signal_decoder_thread_exit() {
      /* release audio pks queue */
     player.audio_pkts_queue.abort = 1;
     av_log(NULL, AV_LOG_ERROR, "set audio queue abort flag\n");
     pthread_mutex_lock(&(player.audio_pkts_queue.queue_lock));
-    pthread_cond_signal(&(player.audio_pkts_queue.queue_cond));
     pthread_mutex_unlock(&(player.audio_pkts_queue.queue_lock));
 
     /* release video pks queue */
     player.video_pkts_queue.abort = 1;
     av_log(NULL, AV_LOG_ERROR, "set video queue abort flag\n");
     pthread_mutex_lock(&(player.video_pkts_queue.queue_lock));
-    pthread_cond_signal(&(player.video_pkts_queue.queue_cond));
     pthread_mutex_unlock(&(player.video_pkts_queue.queue_lock));
 }
 
-static void exit_frames_queue() {
+static void signal_render_thread_exit() {
     /* release audio frames queue */
     player.audio_frames_queue.abort = 1;
-    pthread_mutex_lock(&(player.audio_frames_queue.ring_queue_lock));
-    pthread_cond_signal(&(player.audio_frames_queue.ring_queue_cond_produce));
-    pthread_cond_signal(&(player.audio_frames_queue.ring_queue_cond_consume));
-    pthread_mutex_unlock(&(player.audio_frames_queue.ring_queue_lock));
 
     /* release video frames queue */
     player.video_frames_queue.abort = 1;
-    pthread_mutex_lock(&(player.video_frames_queue.ring_queue_lock));
-    pthread_cond_signal(&(player.video_frames_queue.ring_queue_cond_produce));
-    pthread_cond_signal(&(player.video_frames_queue.ring_queue_cond_consume));
-    pthread_mutex_unlock(&(player.video_frames_queue.ring_queue_lock));
 }
 
 
 static int streams_close() {
-	exit_packets_queue();
+    SDL_CloseAudio();
+    signal_render_thread_exit();
+    SDL_WaitThread(player.video_refresh, NULL);
+
+    signal_decoder_thread_exit();
     SDL_WaitThread(player.audio_decoder_thread, NULL);
     release_audio_filter();
     packet_queue_destroy(&player.audio_pkts_queue);
 
-	SDL_WaitThread(player.video_decoder_thread, NULL);
+    SDL_WaitThread(player.video_decoder_thread, NULL);
     packet_queue_destroy(&player.video_pkts_queue);
 
-    exit_frames_queue();
-    while (!player.is_aplay_end){
-        usleep(10 * 1000);
-    }
-    SDL_CloseAudio();
-
-    SDL_WaitThread(player.video_refresh, NULL);
 
     frame_queue_destroy(&player.audio_frames_queue);
     frame_queue_destroy(&player.video_frames_queue);
@@ -895,7 +869,8 @@ static void process_window_event(const SDL_Event * event) {
             break;
         case SDL_WINDOWEVENT_CLOSE:
             SDL_Log("Window %d closed", event->window.windowID);
-			exit(0);
+            streams_close();
+            exit(0);
             break;
 #if SDL_VERSION_ATLEAST(2, 0, 5)
         case SDL_WINDOWEVENT_TAKE_FOCUS:
@@ -951,7 +926,7 @@ int main(int argc, char* argv[])
     ret = streams_open(&player.context, file_name);
     if (ret < 0) {
         av_log(NULL, AV_LOG_ERROR, "open %s failed, goto fail\n", file_name);
-		return ret;
+        return ret;
     }
     av_dump_format(player.context, 0, file_name, 0);
 
@@ -959,11 +934,12 @@ int main(int argc, char* argv[])
 
     create_audio_render(player.audio_channels, player.audio_samplerate, player.audio_format);
 
-    player.event_thread = SDL_CreateThread(eventloop, "event_loop", NULL);
+    //player.event_thread = SDL_CreateThread(eventloop, "event_loop", NULL);
     //create main thread
     player.main_thread = SDL_CreateThread(main_threadloop, "main_threadloop", player.context);
     SDL_WaitThread(player.main_thread, NULL);
-    streams_close();
+    eventloop();
+    //streams_close();
     return 0;
 }
 
