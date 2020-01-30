@@ -85,6 +85,8 @@ typedef struct AVPlayer {
     int video_width;
     int video_height;
 
+    int index_video_stream;
+    int index_audio_stream;
     /* audio info */
     int audio_samplerate;
     int audio_channels;
@@ -470,7 +472,7 @@ static void video_refresh() {
             if (ts_stream == AV_NOPTS_VALUE)
                 ts_stream = frame_refesh->pkt_dts;
             int64_t timestamp_video_stream = av_rescale_q(ts_stream,
-                                                        player.context->streams[AVMEDIA_TYPE_VIDEO]->time_base,AV_TIME_BASE_Q);
+                                                        player.context->streams[player.index_video_stream]->time_base,AV_TIME_BASE_Q);
             int64_t av_diff = timestamp_video_stream - player.clock.timestamp_audio_stream;
 
             if (av_diff > 0) {
@@ -560,7 +562,7 @@ static int open_video_decoder(AVFormatContext* context) {
     int ret = -1;
 
     AVCodec* pCodec = NULL;
-    pCodec = avcodec_find_decoder(context->streams[AVMEDIA_TYPE_VIDEO]->codecpar->codec_id);
+    pCodec = avcodec_find_decoder(context->streams[player.index_video_stream]->codecpar->codec_id);
     if (NULL != pCodec) {
         player.vcodec_context = avcodec_alloc_context3(pCodec);
         if (NULL == player.vcodec_context) {
@@ -568,7 +570,7 @@ static int open_video_decoder(AVFormatContext* context) {
             ret = -1;
             goto fail;
         }
-        avcodec_parameters_to_context(player.vcodec_context, context->streams[AVMEDIA_TYPE_VIDEO]->codecpar);
+        avcodec_parameters_to_context(player.vcodec_context, context->streams[player.index_video_stream]->codecpar);
     }
     ret = avcodec_open2(player.vcodec_context, NULL, NULL);
     if (0 == ret) {
@@ -583,7 +585,8 @@ static int open_audio_decoder(AVFormatContext* context) {
     int ret = -1;
 
     AVCodec* pCodec = NULL;
-    pCodec = avcodec_find_decoder(context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->codec_id);
+    int index_audio_stream = player.index_audio_stream;
+    pCodec = avcodec_find_decoder(context->streams[index_audio_stream]->codecpar->codec_id);
     if (NULL != pCodec) {
         player.acodec_context = avcodec_alloc_context3(pCodec);
         if (NULL == player.acodec_context) {
@@ -591,11 +594,11 @@ static int open_audio_decoder(AVFormatContext* context) {
             ret = -1;
             goto fail;
         }
-        player.audio_samplerate = context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->sample_rate;
-        player.audio_channels = context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->channels;
-        player.audio_format = context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->format;
-        player.audio_channel_layout = context->streams[AVMEDIA_TYPE_AUDIO]->codecpar->channel_layout;
-        avcodec_parameters_to_context(player.acodec_context, context->streams[AVMEDIA_TYPE_AUDIO]->codecpar);
+        player.audio_samplerate = context->streams[index_audio_stream]->codecpar->sample_rate;
+        player.audio_channels = context->streams[index_audio_stream]->codecpar->channels;
+        player.audio_format = context->streams[index_audio_stream]->codecpar->format;
+        player.audio_channel_layout = context->streams[index_audio_stream]->codecpar->channel_layout;
+        avcodec_parameters_to_context(player.acodec_context, context->streams[index_audio_stream]->codecpar);
     }
     ret = avcodec_open2(player.acodec_context, NULL, NULL);
     if (0 == ret) {
@@ -688,8 +691,28 @@ go_on:
     av_frame_free(&filter_audio_frame);
     av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
 }
-static int streams_open(AVFormatContext **context, const char*name) {
+
+static void select_streams(AVFormatContext* context) {
+    int i;
+    player.index_video_stream = AVMEDIA_TYPE_VIDEO;
+    player.index_audio_stream = AVMEDIA_TYPE_AUDIO;
+    for (int i = 0; i < context->nb_streams; i++) {
+        enum AVMediaType stream_type = context->streams[i]->codecpar->codec_type;
+        av_log(NULL, AV_LOG_ERROR, "%s: stream:%d type:%d\n", __func__, i, stream_type);
+        if (stream_type == AVMEDIA_TYPE_VIDEO) {
+            player.index_video_stream = i;
+        }
+        if (stream_type = AVMEDIA_TYPE_AUDIO) {
+            player.index_audio_stream = i;
+        }
+    }
+    av_log(NULL, AV_LOG_ERROR, "%s: video_stream:%d, audio_stream:%d\n", __func__,
+             player.index_video_stream, player.index_audio_stream);
+}
+
+static int streams_open(const char*name) {
     int ret;
+    AVFormatContext *context = NULL;
     player.is_aplay_end = 0;
     if (!player.aframe_playing) {
         player.aframe_playing = av_frame_alloc();
@@ -700,45 +723,47 @@ static int streams_open(AVFormatContext **context, const char*name) {
     player.clock.timestamp_audio_stream = -1;
     player.clock.timestamp_audio_real = -1;
     player.clock.timestamp_video_stream = -1;
-    ret = avformat_open_input(context, name, NULL, NULL);
+    ret = avformat_open_input(&context, name, NULL, NULL);
     if (ret < 0) {
         av_log(NULL, AV_LOG_ERROR, "%s, open %s failed!!!!\n", __func__, name);
         return ret;
     }
 
-    ret = avformat_find_stream_info(*context, NULL);
+    ret = avformat_find_stream_info(context, NULL);
     if (ret < 0) {
-        avformat_close_input(*context);
+        avformat_close_input(&context);
         av_log(context, AV_LOG_ERROR, "%s, find stream info failed\n", __func__);
         return ret;
     }
-    av_log(NULL, AV_LOG_ERROR, "start time:%lld\n", (*context)->start_time);
-    player.video_width = (*context)->streams[AVMEDIA_TYPE_VIDEO]->codecpar->width;
-    player.video_height = (*context)->streams[AVMEDIA_TYPE_VIDEO]->codecpar->height;
+    player.context = context;
+    av_log(NULL, AV_LOG_ERROR, "start time:%lld\n", (context)->start_time);
+    select_streams(context);
+    player.video_width = (context)->streams[player.index_video_stream]->codecpar->width;
+    player.video_height = (context)->streams[player.index_video_stream]->codecpar->height;
 
     player.video_surface.width = player.video_width;
     player.video_surface.height = player.video_height;
 
-    ret = open_video_decoder(*context);
+    ret = open_video_decoder(context);
     if (ret < 0) {
         av_log(context, AV_LOG_ERROR, "%s, open video decoder failed\n", __func__);
-        avformat_close_input(*context);
+        avformat_close_input(&context);
         return ret;
     }
     packet_queue_init(&player.video_pkts_queue);
     frame_queue_init(&player.video_frames_queue);
 
-    player.video_decoder_thread = SDL_CreateThread(video_decoder_threadloop, "video_decoder_threadloop", player.context);
-    player.video_refresh = SDL_CreateThread(video_refresh, "video_refresh", player.context);
+    player.video_decoder_thread = SDL_CreateThread(video_decoder_threadloop, "video_decoder_threadloop", context);
+    player.video_refresh = SDL_CreateThread(video_refresh, "video_refresh", context);
 
-    ret = open_audio_decoder(*context);
+    ret = open_audio_decoder(context);
     if (ret < 0) {
         av_log(context, AV_LOG_ERROR, "%s, open audio decoder failed\n", __func__);
     }
     packet_queue_init(&player.audio_pkts_queue);
     init_audio_filter();
     frame_queue_init(&player.audio_frames_queue);
-    player.audio_decoder_thread = SDL_CreateThread(audio_decoder_threadloop, "audio_decoder_threadloop", player.context);
+    player.audio_decoder_thread = SDL_CreateThread(audio_decoder_threadloop, "audio_decoder_threadloop", context);
 
     return ret;
 }
@@ -803,10 +828,10 @@ static void main_threadloop(AVFormatContext* context) {
             av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", read_ret);
             usleep(10 * 1000);
         }
-        if (pkt.stream_index == AVMEDIA_TYPE_VIDEO) {
+        if (pkt.stream_index == player.index_video_stream) {
             packet_queue_put(&player.video_pkts_queue, &pkt);
         } 
-        if (pkt.stream_index == AVMEDIA_TYPE_AUDIO) {
+        if (pkt.stream_index == player.index_audio_stream) {
             packet_queue_put(&player.audio_pkts_queue, &pkt);
         }
     }
@@ -922,7 +947,7 @@ int main(int argc, char* argv[])
 
     av_register_all();
 
-    ret = streams_open(&player.context, file_name);
+    ret = streams_open(file_name);
     if (ret < 0) {
         av_log(NULL, AV_LOG_ERROR, "open %s failed, goto fail\n", file_name);
         return ret;
