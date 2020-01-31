@@ -145,7 +145,7 @@ static const struct TextureFormatEntry {
     { AV_PIX_FMT_NONE,           SDL_PIXELFORMAT_UNKNOWN },
 };
 
-AVPlayer player;
+static AVPlayer player;
 static SDL_AudioDeviceID audio_render;
 
 static int streams_close();
@@ -494,9 +494,22 @@ static void update_audio_clock(int64_t pts) {
     player.clock.timestamp_audio_stream = timestamp_stream - 100000;
 }
 
+static int64_t get_current_position() {
+    return player.clock.timestamp_audio_stream;
+}
+
+static void update_played_time() {
+    char title[256] = {0};
+    sprintf(title, "%s, play(%d:%d)", player.context->filename, 
+                (get_current_position() + 500000) / 1000000,
+                (player.context->duration + 500000) / 1000000);
+    SDL_SetWindowTitle(player.video_surface.window, title);
+}
+
 static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
     int data_length = 0;
     int length_read = 0;
+    update_played_time();
     if (player.aframe_playing) {
         SDL_memset(buffer, 0, len);
         while (len > 0) {
@@ -527,8 +540,7 @@ static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
 static int create_video_render(int width, int height, int pixel_format)
 {
     SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_TIMER);
-    
-    player.video_surface.window = SDL_CreateWindow("test", 0, 0, width, height, SDL_WINDOW_RESIZABLE);
+    player.video_surface.window = SDL_CreateWindow("", 0, 0, width, height, SDL_WINDOW_RESIZABLE);
     player.video_surface.render = SDL_CreateRenderer(player.video_surface.window, -1, 0);
     player.video_surface.texture = SDL_CreateTexture(player.video_surface.render, pixel_format, SDL_TEXTUREACCESS_STREAMING, width, height);
 
@@ -693,16 +705,21 @@ go_on:
 }
 
 static void select_streams(AVFormatContext* context) {
-    int i;
+    int i = 0;
+    int is_vstream_find = 0;
+    int is_astream_find = 0;
+
     player.index_video_stream = AVMEDIA_TYPE_VIDEO;
     player.index_audio_stream = AVMEDIA_TYPE_AUDIO;
     for (int i = 0; i < context->nb_streams; i++) {
         enum AVMediaType stream_type = context->streams[i]->codecpar->codec_type;
         av_log(NULL, AV_LOG_ERROR, "%s: stream:%d type:%d\n", __func__, i, stream_type);
-        if (stream_type == AVMEDIA_TYPE_VIDEO) {
+        if (stream_type == AVMEDIA_TYPE_VIDEO && !is_vstream_find) {
+            is_vstream_find = 1;
             player.index_video_stream = i;
         }
-        if (stream_type == AVMEDIA_TYPE_AUDIO) {
+        if (stream_type == AVMEDIA_TYPE_AUDIO && !is_astream_find) {
+            is_astream_find = 1;
             player.index_audio_stream = i;
         }
     }
@@ -826,7 +843,7 @@ static void main_threadloop(AVFormatContext* context) {
         int read_ret = av_read_frame(player.context, &pkt);
         if (read_ret < 0) {
             av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", read_ret);
-            usleep(10 * 1000);
+            return;
         }
         if (pkt.stream_index == player.index_video_stream) {
             packet_queue_put(&player.video_pkts_queue, &pkt);
@@ -838,6 +855,7 @@ static void main_threadloop(AVFormatContext* context) {
     av_log(NULL, AV_LOG_ERROR, "main thread exit success\n");
     return;
 }
+
 
 static void process_window_event(const SDL_Event * event) {
     switch (event->window.event) {
@@ -962,7 +980,9 @@ int main(int argc, char* argv[])
     //create main thread
     player.main_thread = SDL_CreateThread(main_threadloop, "main_threadloop", player.context);
     SDL_WaitThread(player.main_thread, NULL);
-    //streams_close();
+    while (1) {
+        usleep(10 * 100); //never exit
+    }
     return 0;
 }
 
