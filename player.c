@@ -702,7 +702,7 @@ static void select_streams(AVFormatContext* context) {
         if (stream_type == AVMEDIA_TYPE_VIDEO) {
             player.index_video_stream = i;
         }
-        if (stream_type = AVMEDIA_TYPE_AUDIO) {
+        if (stream_type == AVMEDIA_TYPE_AUDIO) {
             player.index_audio_stream = i;
         }
     }
