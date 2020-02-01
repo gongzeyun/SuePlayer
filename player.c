@@ -481,14 +481,16 @@ static void video_refresh() {
             int64_t ts_stream = frame_refesh->pts;
             if (ts_stream == AV_NOPTS_VALUE)
                 ts_stream = frame_refesh->pkt_dts;
-            int64_t timestamp_video_stream = av_rescale_q(ts_stream,
+            int64_t timestamp_video_real = av_rescale_q(ts_stream,
                                                         player.context->streams[player.index_video_stream]->time_base,AV_TIME_BASE_Q);
-            int64_t av_diff = timestamp_video_stream - player.clock.timestamp_audio_stream;
-
+            int64_t av_diff = timestamp_video_real - player.clock.timestamp_audio_real;
+            player.clock.timestamp_video_real = timestamp_video_real;
+			player.clock.timestamp_video_stream = frame_refesh->pkt_dts;
+            av_log(NULL, AV_LOG_ERROR,"av diff:%lldms\n", av_diff / 1000);
             if (av_diff > 0) {
                 usleep(av_diff);
-                render_video_frame(frame_refesh);
             }
+            render_video_frame(frame_refesh);
             av_frame_unref(frame_refesh);
         } else {
             break;
@@ -500,12 +502,13 @@ static void video_refresh() {
 }
 
 static void update_audio_clock(int64_t pts) {
-    int64_t timestamp_stream = av_rescale_q(pts, player.context->streams[1]->time_base, AV_TIME_BASE_Q);
-    player.clock.timestamp_audio_stream = timestamp_stream - 100000;
+    player.clock.timestamp_audio_stream = pts;
+    int64_t timestamp_real = av_rescale_q(pts, player.context->streams[1]->time_base, AV_TIME_BASE_Q);
+    player.clock.timestamp_audio_real= timestamp_real - 100000;
 }
 
 static int64_t get_current_position() {
-    return player.clock.timestamp_audio_stream;
+    return player.clock.timestamp_audio_real - player.context->start_time;
 }
 
 static void update_played_time() {
