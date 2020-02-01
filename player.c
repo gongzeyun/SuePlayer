@@ -78,6 +78,7 @@ typedef struct AVPlayer {
     AudioRender *audio_render;
 
     AVFormatContext *context;
+    pthread_mutex_t context_lock;
     AVCodecContext* vcodec_context;
     AVCodecContext* acodec_context;
 
@@ -723,13 +724,23 @@ static void select_streams(AVFormatContext* context) {
     for (int i = 0; i < context->nb_streams; i++) {
         enum AVMediaType stream_type = context->streams[i]->codecpar->codec_type;
         av_log(NULL, AV_LOG_ERROR, "%s: stream:%d type:%d\n", __func__, i, stream_type);
-        if (stream_type == AVMEDIA_TYPE_VIDEO && !is_vstream_find) {
-            is_vstream_find = 1;
-            player.index_video_stream = i;
+        if (stream_type == AVMEDIA_TYPE_VIDEO) {
+            if (!is_vstream_find) {
+                is_vstream_find = 1;
+                player.index_video_stream = i;
+            }else {
+                context->streams[i]->discard = AVDISCARD_ALL;
+            }
         }
-        if (stream_type == AVMEDIA_TYPE_AUDIO && !is_astream_find) {
-            is_astream_find = 1;
-            player.index_audio_stream = i;
+        else if (stream_type == AVMEDIA_TYPE_AUDIO) {
+            if (!is_astream_find) {
+                is_astream_find = 1;
+                player.index_audio_stream = i;
+            } else {
+                context->streams[i]->discard = AVDISCARD_ALL;
+            }
+        }else {
+            context->streams[i]->discard = AVDISCARD_ALL;
         }
     }
     av_log(NULL, AV_LOG_ERROR, "%s: video_stream:%d, audio_stream:%d\n", __func__,
@@ -739,6 +750,7 @@ static void select_streams(AVFormatContext* context) {
 static int streams_open(const char*name) {
     int ret;
     AVFormatContext *context = NULL;
+    pthread_mutex_init(&(player.context_lock), NULL);
     player.is_aplay_end = 0;
     if (!player.aframe_playing) {
         player.aframe_playing = av_frame_alloc();
@@ -749,17 +761,18 @@ static int streams_open(const char*name) {
     player.clock.timestamp_audio_stream = -1;
     player.clock.timestamp_audio_real = -1;
     player.clock.timestamp_video_stream = -1;
+    pthread_mutex_lock(&(player.context_lock));
     ret = avformat_open_input(&context, name, NULL, NULL);
     if (ret < 0) {
         av_log(NULL, AV_LOG_ERROR, "%s, open %s failed!!!!\n", __func__, name);
-        return ret;
+        goto fail;
     }
 
     ret = avformat_find_stream_info(context, NULL);
     if (ret < 0) {
         avformat_close_input(&context);
         av_log(context, AV_LOG_ERROR, "%s, find stream info failed\n", __func__);
-        return ret;
+        goto fail;
     }
     player.context = context;
     av_log(NULL, AV_LOG_ERROR, "start time:%lld\n", (context)->start_time);
@@ -774,7 +787,7 @@ static int streams_open(const char*name) {
     if (ret < 0) {
         av_log(context, AV_LOG_ERROR, "%s, open video decoder failed\n", __func__);
         avformat_close_input(&context);
-        return ret;
+        goto fail;
     }
     packet_queue_init(&player.video_pkts_queue);
     frame_queue_init(&player.video_frames_queue);
@@ -785,12 +798,14 @@ static int streams_open(const char*name) {
     ret = open_audio_decoder(context);
     if (ret < 0) {
         av_log(context, AV_LOG_ERROR, "%s, open audio decoder failed\n", __func__);
+		goto fail;
     }
     packet_queue_init(&player.audio_pkts_queue);
     init_audio_filter();
     frame_queue_init(&player.audio_frames_queue);
     player.audio_decoder_thread = SDL_CreateThread(audio_decoder_threadloop, "audio_decoder_threadloop", context);
-
+fail:
+    pthread_mutex_unlock(&(player.context_lock));
     return ret;
 }
 
@@ -838,7 +853,9 @@ static int streams_close() {
         player.vcodec_context = NULL;
     }
     if (player.context != NULL) {
+        pthread_mutex_lock(&(player.context_lock));
         avformat_close_input(&player.context);
+        pthread_mutex_unlock(&(player.context_lock));
     }
     av_frame_free(&player.aframe_playing);
     return 0;
@@ -848,18 +865,22 @@ static int streams_close() {
 
 static void main_threadloop(AVFormatContext* context) {
     AVPacket pkt;
+    int read_ret;
     while(1) {
-        int read_ret = av_read_frame(player.context, &pkt);
-        if (read_ret < 0) {
-            av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", read_ret);
-            return;
-        }
-        if (pkt.stream_index == player.index_video_stream) {
-            packet_queue_put(&player.video_pkts_queue, &pkt);
-        } 
-        if (pkt.stream_index == player.index_audio_stream) {
-            packet_queue_put(&player.audio_pkts_queue, &pkt);
-        }
+            pthread_mutex_lock(&(player.context_lock));
+            if (player.context)
+                read_ret = av_read_frame(player.context, &pkt);
+            pthread_mutex_unlock(&(player.context_lock));
+            if (read_ret < 0) {
+                av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", read_ret);
+                return;
+            }
+            if (pkt.stream_index == player.index_video_stream) {
+                packet_queue_put(&player.video_pkts_queue, &pkt);
+            }
+            if (pkt.stream_index == player.index_audio_stream) {
+                packet_queue_put(&player.audio_pkts_queue, &pkt);
+            }
     }
     av_log(NULL, AV_LOG_ERROR, "main thread exit success\n");
     return;
