@@ -145,6 +145,7 @@ static const struct TextureFormatEntry {
     { AV_PIX_FMT_NONE,           SDL_PIXELFORMAT_UNKNOWN },
 };
 
+#define MAX_PACKETS_NUM    1024U
 static AVPlayer player;
 static SDL_AudioDeviceID audio_render;
 
@@ -258,30 +259,38 @@ static int packet_queue_init(PacketQueue *queue) {
 }
 
 static int packet_queue_put(PacketQueue *queue, AVPacket *pkt) {
-    pthread_mutex_lock(&(queue->queue_lock));
-    SueAVPacket *sue_pkt = av_malloc(sizeof(SueAVPacket));
-    if (sue_pkt == NULL) {
-        pthread_mutex_unlock(&(queue->queue_lock));
-        av_log(NULL, AV_LOG_ERROR, "no memory, queue pkt(stream:%d, pts:%lld) failed\n", pkt->stream_index, pkt->pts);
-        return -1;
+    int ret = -1;
+    while (!queue->abort) {
+        pthread_mutex_lock(&(queue->queue_lock));
+        if (queue->num_packets > MAX_PACKETS_NUM) {
+            pthread_mutex_unlock(&(queue->queue_lock));
+            usleep(5 * 1000);
+            continue;
+        }
+        SueAVPacket *sue_pkt = av_malloc(sizeof(SueAVPacket));
+        if (sue_pkt == NULL) {
+            pthread_mutex_unlock(&(queue->queue_lock));
+            av_log(NULL, AV_LOG_ERROR, "no memory, queue pkt(stream:%d, pts:%lld) failed\n", pkt->stream_index, pkt->pts);
+            return -1;
+        }
+        sue_pkt->pkt = *pkt;
+        sue_pkt->serial = queue->serial;
+        sue_pkt->next = NULL;
+        if (queue->last_pkt) {
+           queue->last_pkt->next = sue_pkt;
+        }
+        queue->last_pkt = sue_pkt;
+        queue->num_packets++;
+        if (queue->first_pkt == NULL) {
+            queue->first_pkt = queue->last_pkt;
+        }
+        //av_log(NULL, AV_LOG_ERROR, "queue pkt(stream:%d, pts:%lld) success, pkt_num:%d\n", pkt->stream_index, pkt->pts, queue->num_packets);
+        ret = 0;
+        break;
     }
-
-    sue_pkt->pkt = *pkt;
-    sue_pkt->serial = queue->serial;
-    sue_pkt->next = NULL;
-
-    if (queue->last_pkt) {
-       queue->last_pkt->next = sue_pkt;
-    }
-    queue->last_pkt = sue_pkt;
-    queue->num_packets++;
-    if (queue->first_pkt == NULL) {
-        queue->first_pkt = queue->last_pkt;
-    }
-    //av_log(NULL, AV_LOG_ERROR, "queue pkt(stream:%d, pts:%lld) success, pkt_num:%d\n", pkt->stream_index, pkt->pts, queue->num_packets);
     pthread_mutex_unlock(&(queue->queue_lock));
 
-    return 0;
+    return ret;
 }
 
 static int packet_queue_get(PacketQueue *queue, AVPacket* pkt) {
@@ -684,7 +693,7 @@ static int audio_decoder_threadloop() {
                 if (ret == 0) {
                     int size_audio_sample = 2 * filter_audio_frame->nb_samples * av_get_channel_layout_nb_channels(filter_audio_frame->channel_layout);
                     //av_log(NULL, AV_LOG_ERROR, "get audio samples %d bytes from audio filter\n", size_audio_sample);
-                    dump_audio(filter_audio_frame->data[0], size_audio_sample);
+                    //dump_audio(filter_audio_frame->data[0], size_audio_sample);
                     frame_queue_put(&player.audio_frames_queue, filter_audio_frame);
                     av_frame_unref(filter_audio_frame);
                     av_frame_unref(audio_frame);
