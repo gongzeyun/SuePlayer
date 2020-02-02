@@ -490,7 +490,7 @@ static void video_refresh() {
             int64_t av_diff = timestamp_video_real - player.clock.timestamp_audio_real;
             player.clock.timestamp_video_real = timestamp_video_real;
 			player.clock.timestamp_video_stream = frame_refesh->pkt_dts;
-            av_log(NULL, AV_LOG_ERROR,"av diff:%lldms\n", av_diff / 1000);
+            //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms\n", av_diff / 1000);
             if (av_diff > 0) {
                 usleep(av_diff);
             }
@@ -515,6 +515,54 @@ static int64_t get_current_position() {
     return player.clock.timestamp_audio_real - player.context->start_time;
 }
 
+static void avcodec_to_string(char *buf, int buf_size, AVCodecContext *enc, int encode)
+{
+    const char *codec_type;
+    const char *codec_name;
+    const char *profile = NULL;
+    int64_t bitrate;
+    int new_line = 0;
+    AVRational display_aspect_ratio;
+    const char *separator = enc->dump_separator ? (const char *)enc->dump_separator : ", ";
+
+    if (!buf || buf_size <= 0)
+        return;
+    codec_type = av_get_media_type_string(enc->codec_type);
+    codec_name = avcodec_get_name(enc->codec_id);
+    profile = avcodec_profile_name(enc->codec_id, enc->profile);
+
+    snprintf(buf, buf_size, "%s_%s", codec_type ? codec_type : "unknown",
+             codec_name);
+    return;
+}
+
+static void show_tracks_info() {
+    char tracks_info[2048] = {0};
+    for (int i = 0; i < player.context->nb_streams; i++) {
+        char buf[256] = {0};
+        AVStream *st = player.context->streams[i];
+        AVCodecContext *avctx = avcodec_alloc_context3(NULL);
+        if (!avctx)
+            return;
+        int ret = avcodec_parameters_to_context(avctx, st->codecpar);
+        if (ret < 0) {
+            avcodec_free_context(&avctx);
+            return;
+        }
+        // Fields which are missing from AVCodecParameters need to be taken from the AVCodecContext
+        avctx->properties = st->codec->properties;
+        avctx->codec      = st->codec->codec;
+        avctx->qmin       = st->codec->qmin;
+        avctx->qmax       = st->codec->qmax;
+        avctx->coded_width  = st->codec->coded_width;
+        avctx->coded_height = st->codec->coded_height;
+        avcodec_to_string(buf, sizeof(buf), avctx, 1);
+        sprintf(tracks_info + strlen(tracks_info), "#Track_%d:%s    ", i + 1, buf);
+        //av_log(NULL, AV_LOG_ERROR, "tracks info:%s\n", tracks_info);
+        avcodec_free_context(&avctx);
+    }
+    SDL_SetWindowTitle(player.video_surface.window, tracks_info);
+}
 static void update_played_time() {
     char title[256] = {0};
     sprintf(title, "%s, play(%d:%d)", player.context->filename, 
@@ -526,7 +574,7 @@ static void update_played_time() {
 static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
     int data_length = 0;
     int length_read = 0;
-    update_played_time();
+    //update_played_time();
     if (player.aframe_playing) {
         SDL_memset(buffer, 0, len);
         while (len > 0) {
@@ -894,6 +942,17 @@ static void main_threadloop(AVFormatContext* context) {
 }
 
 
+static void process_key_event(const SDL_Event * event) {
+    switch (event->key.keysym.sym) {
+        case SDLK_t:
+            SDL_Log("key T is down\n");
+            update_played_time();
+            break;
+        case SDLK_s:
+            SDL_Log("key S is down\n");
+            show_tracks_info();
+    };
+}
 static void process_window_event(const SDL_Event * event) {
     switch (event->window.event) {
         case SDL_WINDOWEVENT_SHOWN:
@@ -975,6 +1034,7 @@ static void eventloop() {
                 av_log(NULL, AV_LOG_ERROR, "SDL Quit event");
                 break;
             case SDL_KEYDOWN:
+               process_key_event(&event);
                av_log(NULL, AV_LOG_ERROR, "SDL Key event");
                break;
             case SDL_WINDOWEVENT:
