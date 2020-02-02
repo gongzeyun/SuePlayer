@@ -70,6 +70,10 @@ typedef struct SueClock {
 
     int64_t timestamp_video_real;
     int64_t timestamp_video_stream;
+
+    int master_type;
+    int timestamp_master_real;
+    int timestamp_master_stream;
 }SueClock;
 
 
@@ -504,7 +508,7 @@ static void video_refresh() {
 static void update_audio_clock(int64_t pts) {
     player.clock.timestamp_audio_stream = pts;
     int64_t timestamp_real = av_rescale_q(pts, player.context->streams[1]->time_base, AV_TIME_BASE_Q);
-    player.clock.timestamp_audio_real= timestamp_real - 100000;
+    player.clock.timestamp_audio_real= timestamp_real - 150000;
 }
 
 static int64_t get_current_position() {
@@ -717,7 +721,7 @@ go_on:
     av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
 }
 
-static void select_streams(AVFormatContext* context) {
+static void get_defalut_tracks(AVFormatContext* context) {
     int i = 0;
     int is_vstream_find = 0;
     int is_astream_find = 0;
@@ -779,7 +783,7 @@ static int streams_open(const char*name) {
     }
     player.context = context;
     av_log(NULL, AV_LOG_ERROR, "start time:%lld\n", (context)->start_time);
-    select_streams(context);
+    get_defalut_tracks(context);
     player.video_width = (context)->streams[player.index_video_stream]->codecpar->width;
     player.video_height = (context)->streams[player.index_video_stream]->codecpar->height;
 
