@@ -467,6 +467,10 @@ static update_audio_filter(int samplerate, int audio_format, int channels, int c
         avfilter_graph_free(&player.audio_graph);
         player.audio_graph = NULL;
         init_audio_filter(samplerate, audio_format, channels, channel_layout);
+        player.audio_samplerate = samplerate;
+        player.audio_format = audio_format;
+        player.audio_channels = channels;
+        player.audio_channel_layout = channel_layout;
     }
 }
 
