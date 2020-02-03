@@ -828,6 +828,10 @@ static int select_tracks(int stream_selected) {
     player.index_dst_track = stream_selected;
 	av_log(NULL, AV_LOG_ERROR, "stream %d will be selected\n", player.index_dst_track);
     player.flag_select_track = 1;
+    pthread_mutex_lock(&(player.context_lock));
+    avformat_seek_file(player.context, -1, 0, get_current_position() +  player.context->start_time, 
+                                        INT64_MAX, AVSEEK_FLAG_BACKWARD);
+    pthread_mutex_unlock(&(player.context_lock));
 }
 
 
@@ -1003,25 +1007,26 @@ static void main_threadloop(AVFormatContext* context) {
             if (get_stream_type(pkt.stream_index) == AVMEDIA_TYPE_VIDEO) {
                 av_log(NULL, AV_LOG_ERROR, "video pkt(index:%d, pts:%lld, play_index:%d)\n", pkt.stream_index, pkt.pts, player.index_video_stream);
             }
+            if (player.flag_select_track) {
+                if (pkt.stream_index == player.index_dst_track) {
+                    packet_queue_flush(&player.video_pkts_queue);
+                    packet_queue_flush(&player.audio_pkts_queue);  
+                    if (get_stream_type(player.index_dst_track) == AVMEDIA_TYPE_VIDEO) {
+                        AVStream *st_dst = player.context->streams[player.index_dst_track];
+                        AVStream *st_src = player.context->streams[player.index_video_stream];
+                        st_src->discard = AVDISCARD_ALL;
+                        player.index_video_stream = player.index_dst_track;
+                        reset_video_decoder(st_dst);
+                        //reset_video_render(st_dst->codecpar->width, st_dst->codecpar->height, SDL_PIXELFORMAT_IYUV);
+                        player.flag_select_track = 0;
+                    }
+                }
+            }
             if (pkt.stream_index == player.index_video_stream) {
                 packet_queue_put(&player.video_pkts_queue, &pkt);
             }
             if (pkt.stream_index == player.index_audio_stream) {
                 packet_queue_put(&player.audio_pkts_queue, &pkt);
-            }
-            if (player.flag_select_track) {
-                packet_queue_flush(&player.video_pkts_queue);
-                packet_queue_flush(&player.audio_pkts_queue);
-                avformat_seek_file(player.context, -1, 0, get_current_position() +  player.context->start_time, 
-                                        INT64_MAX, AVSEEK_FLAG_BACKWARD);
-                if (get_stream_type(player.index_dst_track) == AVMEDIA_TYPE_VIDEO) {
-                    AVStream *st_dst = player.context->streams[player.index_dst_track];
-                    player.index_src_track = player.index_video_stream;
-                    player.index_video_stream = player.index_dst_track;
-                    reset_video_decoder(st_dst);
-                    //reset_video_render(st_dst->codecpar->width, st_dst->codecpar->height, SDL_PIXELFORMAT_IYUV);
-                    player.flag_select_track = 0;
-                }
             }
     }
     av_log(NULL, AV_LOG_ERROR, "main thread exit success\n");
