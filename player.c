@@ -476,6 +476,23 @@ static int render_video_frame(AVFrame* frame) {
         SDL_RenderPresent(player.video_surface.render);
     }
 }
+static int update_video_render(int width, int height, int pixel_format) {
+    int access, w, h, format;
+    SDL_Texture *texture = player.video_surface.texture;
+    if (SDL_QueryTexture(texture, &format, &access, &w, &h) < 0 || width != w || height != h || pixel_format != format) {
+        void *pixels;
+        int pitch;
+        if (texture)
+            SDL_DestroyTexture(texture);
+        if (!(player.video_surface.texture = SDL_CreateTexture(player.video_surface.render, pixel_format, SDL_TEXTUREACCESS_STREAMING, width, height)))
+            return -1;
+        if (SDL_LockTexture(player.video_surface.texture, NULL, &pixels, &pitch) < 0)
+            return -1;
+        memset(pixels, 0, pitch * height);
+        SDL_UnlockTexture(player.video_surface.texture);
+    }
+    av_log(NULL, AV_LOG_VERBOSE, "Created %dx%d texture with %s.\n", width, height, SDL_GetPixelFormatName(pixel_format));
+}
 
 static void video_refresh() {
     int ret;
@@ -498,6 +515,7 @@ static void video_refresh() {
             if (av_diff > 0) {
                 usleep(av_diff);
             }
+            update_video_render(frame_refesh->width, frame_refesh->height, SDL_PIXELFORMAT_IYUV);
             render_video_frame(frame_refesh);
             av_frame_unref(frame_refesh);
         } else {
@@ -619,10 +637,6 @@ static int create_video_render(int width, int height, int pixel_format)
 
 }
 
-static int reset_video_render(int width, int height, int pixel_format) {
-        SDL_DestroyTexture(player.video_surface.texture);
-        player.video_surface.texture = SDL_CreateTexture(player.video_surface.render, pixel_format, SDL_TEXTUREACCESS_STREAMING, width, height);
-}
 static int create_audio_render(int channels, int samplerate, int format) {
     SDL_AudioSpec request_params, response_params;
     request_params.channels = 2;
