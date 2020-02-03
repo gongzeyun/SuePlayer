@@ -563,7 +563,7 @@ static void show_tracks_info() {
     }
     SDL_SetWindowTitle(player.video_surface.window, tracks_info);
 }
-static void update_played_time() {
+static void update_play_info() {
     char title[256] = {0};
     sprintf(title, "%s, play(%d:%d)", player.context->filename, 
                 (get_current_position() + 500000) / 1000000,
@@ -805,6 +805,7 @@ static void get_defalut_tracks(AVFormatContext* context) {
 static int streams_open(const char*name) {
     int ret;
     AVFormatContext *context = NULL;
+    player.flag_exit = 0;
     pthread_mutex_init(&(player.context_lock), NULL);
     player.is_aplay_end = 0;
     if (!player.aframe_playing) {
@@ -831,6 +832,7 @@ static int streams_open(const char*name) {
     }
     player.context = context;
     av_log(NULL, AV_LOG_ERROR, "start time:%lld\n", (context)->start_time);
+    av_dump_format(player.context, 0, player.context->filename, 0);
     get_defalut_tracks(context);
     player.video_width = (context)->streams[player.index_video_stream]->codecpar->width;
     player.video_height = (context)->streams[player.index_video_stream]->codecpar->height;
@@ -886,6 +888,7 @@ static void signal_render_thread_exit() {
 
 
 static int streams_close() {
+    player.flag_exit = 1;
     signal_render_thread_exit();
     SDL_WaitThread(player.video_refresh, NULL);
     SDL_CloseAudio();
@@ -921,7 +924,7 @@ static int streams_close() {
 static void main_threadloop(AVFormatContext* context) {
     AVPacket pkt;
     int read_ret;
-    while(1) {
+    while(!player.flag_exit) {
             pthread_mutex_lock(&(player.context_lock));
             if (player.context)
                 read_ret = av_read_frame(player.context, &pkt);
@@ -946,7 +949,7 @@ static void process_key_event(const SDL_Event * event) {
     switch (event->key.keysym.sym) {
         case SDLK_t:
             SDL_Log("key T is down\n");
-            update_played_time();
+            update_play_info();
             break;
         case SDLK_s:
             SDL_Log("key S is down\n");
@@ -1067,7 +1070,6 @@ int main(int argc, char* argv[])
         av_log(NULL, AV_LOG_ERROR, "open %s failed, goto fail\n", file_name);
         return ret;
     }
-    av_dump_format(player.context, 0, file_name, 0);
 
     create_video_render(player.video_width, player.video_height, SDL_PIXELFORMAT_IYUV);
 
