@@ -125,6 +125,7 @@ typedef struct AVPlayer {
 
     int index_src_track;
     int index_dst_track;
+    int flag_select_track;
 }AVPlayer;
 
 static const struct TextureFormatEntry {
@@ -462,17 +463,17 @@ static int render_video_frame(AVFrame* frame) {
     SDL_Event event;
     if (frame) {
         SDL_PollEvent(&event);
-         SDL_UpdateYUVTexture(player.video_surface.texture, NULL, frame->data[0], frame->linesize[0],
+        SDL_UpdateYUVTexture(player.video_surface.texture, NULL, frame->data[0], frame->linesize[0],
                               frame->data[1], frame->linesize[1],
                               frame->data[2], frame->linesize[2]);
-         SDL_Rect sdlRect;
-         sdlRect.x = 0;
-         sdlRect.y = 0;
-         sdlRect.w = player.video_surface.width;
-         sdlRect.h = player.video_surface.height;
-         SDL_RenderClear(player.video_surface.render);
-         SDL_RenderCopy(player.video_surface.render, player.video_surface.texture, NULL, &sdlRect);
-         SDL_RenderPresent(player.video_surface.render);
+        SDL_Rect sdlRect;
+        sdlRect.x = 0;
+        sdlRect.y = 0;
+        sdlRect.w = player.video_surface.width;
+        sdlRect.h = player.video_surface.height;
+        SDL_RenderClear(player.video_surface.render);
+        SDL_RenderCopy(player.video_surface.render, player.video_surface.texture, NULL, &sdlRect);
+        SDL_RenderPresent(player.video_surface.render);
     }
 }
 
@@ -618,6 +619,10 @@ static int create_video_render(int width, int height, int pixel_format)
 
 }
 
+static int reset_video_render(int width, int height, int pixel_format) {
+        SDL_DestroyTexture(player.video_surface.texture);
+        player.video_surface.texture = SDL_CreateTexture(player.video_surface.render, pixel_format, SDL_TEXTUREACCESS_STREAMING, width, height);
+}
 static int create_audio_render(int channels, int samplerate, int format) {
     SDL_AudioSpec request_params, response_params;
     request_params.channels = 2;
@@ -806,24 +811,12 @@ static int select_tracks(int stream_selected) {
 
     AVStream *st_dst = player.context->streams[stream_selected];
     st_dst->discard = AVDISCARD_DEFAULT;
-
+    player.index_dst_track = stream_selected;
 	av_log(NULL, AV_LOG_ERROR, "stream %d will be selected\n", player.index_dst_track);
-
-    /* step 1: reset decoder
-      step 2: reset video render
-      step 3: seek to current position
-   */
-   
-    if (get_stream_type(player.index_dst_track) == AVMEDIA_TYPE_VIDEO) {
-        AVStream *st_src = player.context->streams[player.index_video_stream];
-        st_src->discard = AVDISCARD_ALL;
-        player.index_video_stream = stream_selected;
-        //reset_video_decoder(st_dst);
-        //reset_video_render(st_dst);
-    } else if (get_stream_type(player.index_dst_track) == AVMEDIA_TYPE_AUDIO) {
-        //reset_audio_decoder();
-    }
+    player.flag_select_track = 1;
 }
+
+
 static void get_defalut_tracks(AVFormatContext* context) {
     int i = 0;
     int is_vstream_find = 0;
@@ -861,6 +854,7 @@ static int streams_open(const char*name) {
     int ret;
     AVFormatContext *context = NULL;
     player.flag_exit = 0;
+    player.flag_select_track = 0;
     pthread_mutex_init(&(player.context_lock), NULL);
     player.is_aplay_end = 0;
     if (!player.aframe_playing) {
@@ -984,21 +978,36 @@ static void main_threadloop(AVFormatContext* context) {
     int read_ret;
     while(!player.flag_exit) {
             pthread_mutex_lock(&(player.context_lock));
-            if (player.context)
+            if (player.context) {
                 read_ret = av_read_frame(player.context, &pkt);
+            }
             pthread_mutex_unlock(&(player.context_lock));
             if (read_ret < 0) {
                 av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", read_ret);
                 return;
             }
             if (get_stream_type(pkt.stream_index) == AVMEDIA_TYPE_VIDEO) {
-                av_log(NULL, AV_LOG_ERROR, "video pkt(index:%d, pts:%lld)\n", pkt.stream_index, pkt.pts);
+                av_log(NULL, AV_LOG_ERROR, "video pkt(index:%d, pts:%lld, play_index:%d)\n", pkt.stream_index, pkt.pts, player.index_video_stream);
             }
             if (pkt.stream_index == player.index_video_stream) {
                 packet_queue_put(&player.video_pkts_queue, &pkt);
             }
             if (pkt.stream_index == player.index_audio_stream) {
                 packet_queue_put(&player.audio_pkts_queue, &pkt);
+            }
+            if (player.flag_select_track) {
+                packet_queue_flush(&player.video_pkts_queue);
+                packet_queue_flush(&player.audio_pkts_queue);
+                avformat_seek_file(player.context, -1, 0, get_current_position() +  player.context->start_time, 
+                                        INT64_MAX, AVSEEK_FLAG_BACKWARD);
+                if (get_stream_type(player.index_dst_track) == AVMEDIA_TYPE_VIDEO) {
+                    AVStream *st_dst = player.context->streams[player.index_dst_track];
+                    player.index_src_track = player.index_video_stream;
+                    player.index_video_stream = player.index_dst_track;
+                    reset_video_decoder(st_dst);
+                    //reset_video_render(st_dst->codecpar->width, st_dst->codecpar->height, SDL_PIXELFORMAT_IYUV);
+                    player.flag_select_track = 0;
+                }
             }
     }
     av_log(NULL, AV_LOG_ERROR, "main thread exit success\n");
