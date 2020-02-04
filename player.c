@@ -120,6 +120,8 @@ typedef struct AVPlayer {
     AVFrame *aframe_playing;
 
     SueClock clock;
+    int seek_req;
+    int64_t seek_target; //-1 means seek to current pos
 
     int flag_exit;
 
@@ -527,11 +529,12 @@ static void video_refresh() {
             player.clock.timestamp_video_real = timestamp_video_real;
             player.clock.timestamp_video_stream = frame_refesh->pkt_dts;
             //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms\n", av_diff / 1000);
-            if (av_diff > 0) {
-                usleep(av_diff);
+            if (av_diff > -50000) {
+                int64_t sleep_us = av_diff > 0 ? av_diff : 0;
+                usleep(sleep_us);
+                update_video_render(frame_refesh->width, frame_refesh->height, SDL_PIXELFORMAT_IYUV);
+                render_video_frame(frame_refesh);
             }
-            update_video_render(frame_refesh->width, frame_refesh->height, SDL_PIXELFORMAT_IYUV);
-            render_video_frame(frame_refesh);
             av_frame_unref(frame_refesh);
         } else {
             break;
@@ -615,7 +618,7 @@ static void update_play_info() {
 static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
     int data_length = 0;
     int length_read = 0;
-    //update_played_time();
+    update_play_info();
     if (player.aframe_playing) {
         SDL_memset(buffer, 0, len);
         while (len > 0) {
@@ -844,10 +847,8 @@ static int select_tracks(int stream_selected) {
     player.index_dst_track = stream_selected;
     av_log(NULL, AV_LOG_ERROR, "stream %d will be selected\n", player.index_dst_track);
     player.flag_select_track = 1;
-    pthread_mutex_lock(&(player.context_lock));
-    avformat_seek_file(player.context, -1, 0, get_current_position() +  player.context->start_time, 
-                                        INT64_MAX, AVSEEK_FLAG_BACKWARD);
-    pthread_mutex_unlock(&(player.context_lock));
+    player.seek_req = 1;
+    player.seek_target = -1;
 }
 
 
@@ -1023,10 +1024,17 @@ static void main_threadloop(AVFormatContext* context) {
             //if (get_stream_type(pkt.stream_index) == AVMEDIA_TYPE_VIDEO) {
             //    av_log(NULL, AV_LOG_ERROR, "video pkt(index:%d, pts:%lld, play_index:%d)\n", pkt.stream_index, pkt.pts, player.index_video_stream);
             //}
+            if (player.seek_req) {
+                int64_t start_time = player.context->start_time;
+                int64_t seek_pos = (player.seek_target == -1) ? (get_current_position()) : player.seek_target;
+                av_log(NULL, AV_LOG_ERROR, "====seek to %lld, start_time:%lld====\n", (seek_pos + 500000) / 1000000, start_time);
+                avformat_seek_file(player.context, -1, 0, seek_pos + start_time, INT64_MAX, AVSEEK_FLAG_BACKWARD);
+                player.seek_req = 0;
+            }
             if (player.flag_select_track) {
+                packet_queue_flush(&player.video_pkts_queue);
+                packet_queue_flush(&player.audio_pkts_queue);
                 if (pkt.stream_index == player.index_dst_track) {
-                    packet_queue_flush(&player.video_pkts_queue);
-                    packet_queue_flush(&player.audio_pkts_queue);
                     AVStream *st_dst = player.context->streams[player.index_dst_track];
                     if (get_stream_type(player.index_dst_track) == AVMEDIA_TYPE_VIDEO) {
                         AVStream *st_src = player.context->streams[player.index_video_stream];
