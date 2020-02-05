@@ -548,7 +548,7 @@ static void video_refresh() {
             int64_t av_diff = timestamp_video_real - player.clock.timestamp_audio_real;
             player.clock.timestamp_video_real = timestamp_video_real;
             player.clock.timestamp_video_stream = frame_refesh->pkt_dts;
-            //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms, video_real:%lld, audio_real:%lld\n", av_diff / 1000, timestamp_video_real, player.clock.timestamp_audio_real);
+            av_log(NULL, AV_LOG_ERROR,"av diff:%lldms, video_real:%lld, audio_real:%lld\n", av_diff / 1000, timestamp_video_real, player.clock.timestamp_audio_real);
             if (av_diff > -50000 && !player.is_seeking) {
                 int64_t sleep_us = av_diff > 0 ? av_diff : 0;
                 usleep(sleep_us);
@@ -567,7 +567,7 @@ static void video_refresh() {
 
 static void update_audio_clock(int64_t pts) {
     player.clock.timestamp_audio_stream = pts;
-    int64_t timestamp_real = av_rescale_q(pts, player.context->streams[1]->time_base, AV_TIME_BASE_Q);
+    int64_t timestamp_real = av_rescale_q(pts, player.context->streams[player.index_audio_stream]->time_base, AV_TIME_BASE_Q);
     player.clock.timestamp_audio_real= timestamp_real - 150000;
 }
 
