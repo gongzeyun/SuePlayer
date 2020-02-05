@@ -42,7 +42,7 @@ typedef struct SueFrameRingQueue {
     pthread_mutex_t ring_queue_lock;
 
     int last_operation;/* 0:read, 1:write */
-    int abort;
+    int abort;;
 }SueFrameRingQueue;
 
 typedef struct SueAVPacket {
@@ -84,8 +84,9 @@ typedef struct AVPlayer {
     AVFormatContext *context;
     pthread_mutex_t context_lock;
     AVCodecContext* vcodec_context;
+    pthread_mutex_t vdec_context_lock;
     AVCodecContext* acodec_context;
-
+    pthread_mutex_t adec_context_lock;
     /* video info */
     int video_width;
     int video_height;
@@ -122,12 +123,15 @@ typedef struct AVPlayer {
     SueClock clock;
     int seek_req;
     int64_t seek_target; //-1 means seek to current pos
+    int is_seeking;
 
     int flag_exit;
 
     int index_src_track;
     int index_dst_track;
     int flag_select_track;
+
+    int is_full_screen;
 }AVPlayer;
 
 static const struct TextureFormatEntry {
@@ -176,6 +180,20 @@ static int frame_queue_init(SueFrameRingQueue* frame_queue) {
     return 0;
 }
 
+static int frame_queue_flush(SueFrameRingQueue* frame_queue) {
+    av_log(NULL, AV_LOG_ERROR, "%s enter\n", __func__);
+    pthread_mutex_lock(&(frame_queue->ring_queue_lock));
+    frame_queue->pos_read = 0;
+    frame_queue->pos_write = 0;
+    frame_queue->last_operation = 0;
+    frame_queue->abort = 0;
+    for (int i = 0; i < NUM_FRAMES_RING_BUFFER; i++) {
+        av_frame_unref(frame_queue->sue_frames[i].frame);
+    }
+    pthread_mutex_unlock(&(frame_queue->ring_queue_lock));
+    av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
+}
+
 static int frame_queue_destroy(SueFrameRingQueue* frame_queue) {
     for (int i = 0; i < NUM_FRAMES_RING_BUFFER; i++) {
         av_frame_unref(frame_queue->sue_frames[i].frame);
@@ -204,7 +222,8 @@ static int frame_queue_put(SueFrameRingQueue* frame_queue, AVFrame* frame) {
         }
         av_frame_unref(frame_queue->sue_frames[frame_queue->pos_write].frame);
         av_frame_move_ref(frame_queue->sue_frames[frame_queue->pos_write].frame, frame);
-
+        //av_log(NULL, AV_LOG_ERROR, "====write frame(pts:%lld) success, serial:%d\n",
+        //          frame_queue->sue_frames[frame_queue->pos_write].frame->pts, frame_queue->sue_frames[frame_queue->pos_write].serial);
         if (frame_queue->pos_read == -1) {
             frame_queue->pos_read = 0;
         }
@@ -213,8 +232,7 @@ static int frame_queue_put(SueFrameRingQueue* frame_queue, AVFrame* frame) {
         frame_queue->pos_write++;
         frame_queue->pos_write %= NUM_FRAMES_RING_BUFFER;
         frame_queue->last_operation = 1;
-       //av_log(NULL, AV_LOG_ERROR, "====write frame(pts:%lld) success, write_pos:%d, next_write_pos:%d\n",
-       //       frame_queue->sue_frames[tmp_pos_write].frame->pts, tmp_pos_write, frame_queue->pos_write);
+
         ret = 0;
         break;
     }
@@ -249,7 +267,7 @@ static int frame_queue_get(SueFrameRingQueue* frame_queue, AVFrame* frame) {
         frame_queue->pos_read++;
         frame_queue->pos_read %= NUM_FRAMES_RING_BUFFER;
         frame_queue->last_operation = 0;
-        //av_log(NULL, AV_LOG_ERROR, "====read frame(pts:%lld) success, read_pos:%d, next_read_pos:%d\n", frame->pts, temp_pos_read, frame_queue->pos_read);
+        //av_log(NULL, AV_LOG_ERROR, "====read frame(pts:%lld) success, read_pos:%d, serial%d\n", frame->pts, temp_pos_read, frame_queue->sue_frames[frame_queue->pos_read].serial);
         ret = 0;
         break;
     }
@@ -316,7 +334,7 @@ static int packet_queue_get(PacketQueue *queue, AVPacket* pkt) {
             if (queue->first_pkt == NULL) {
                 queue->last_pkt = NULL;
             }
-            //av_log(NULL, AV_LOG_ERROR, "dequeue pkt(stream:%d, pts:%lld) success, pkt_num:%d\n", pkt->stream_index, pkt->pts, queue->num_packets);
+            //av_log(NULL, AV_LOG_ERROR, "dequeue pkt(stream:%d, pts:%lld) success, serial:%d\n", pkt->stream_index, pkt->pts, sue_pkt->serial);
             av_free(sue_pkt);
             ret = 0;
             break;
@@ -342,6 +360,7 @@ static void packet_queue_flush(PacketQueue *queue)
     queue->last_pkt = NULL;
     queue->first_pkt = NULL;
     queue->num_packets = 0;
+    queue->serial++;
     pthread_mutex_unlock(&(queue->queue_lock));
 }
 
@@ -517,6 +536,7 @@ static void video_refresh() {
     if (!frame_refesh) {
         return;
     }
+    int serial = 0;
     for (;;) {
         ret = frame_queue_get(&player.video_frames_queue, frame_refesh);
         if (ret == 0) {
@@ -528,8 +548,8 @@ static void video_refresh() {
             int64_t av_diff = timestamp_video_real - player.clock.timestamp_audio_real;
             player.clock.timestamp_video_real = timestamp_video_real;
             player.clock.timestamp_video_stream = frame_refesh->pkt_dts;
-            //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms\n", av_diff / 1000);
-            if (av_diff > -50000) {
+            //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms, video_real:%lld, audio_real:%lld\n", av_diff / 1000, timestamp_video_real, player.clock.timestamp_audio_real);
+            if (av_diff > -50000 && !player.is_seeking) {
                 int64_t sleep_us = av_diff > 0 ? av_diff : 0;
                 usleep(sleep_us);
                 update_video_render(frame_refesh->width, frame_refesh->height, SDL_PIXELFORMAT_IYUV);
@@ -618,7 +638,8 @@ static void update_play_info() {
 static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
     int data_length = 0;
     int length_read = 0;
-    update_play_info();
+    //update_play_info();
+    int serial = 0;
     if (player.aframe_playing) {
         SDL_memset(buffer, 0, len);
         while (len > 0) {
@@ -640,7 +661,9 @@ static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
             buffer += length_read;
             player.pos_abuffer_read += length_read;
             len -= length_read;
-            update_audio_clock(player.aframe_playing->pkt_pts);
+            //av_log(NULL, AV_LOG_ERROR, "%s, pts:%lld, is_seeking:%d\n", __func__, player.aframe_playing->pkt_pts, player.is_seeking);
+            if (!player.is_seeking)
+                update_audio_clock(player.aframe_playing->pkt_pts);
         }
     }
 }
@@ -685,8 +708,10 @@ static int open_video_decoder(AVFormatContext* context, AVStream *st) {
     AVCodec* pCodec = NULL;
     pCodec = avcodec_find_decoder(st->codecpar->codec_id);
     if (NULL != pCodec) {
+        pthread_mutex_init(&(player.vdec_context_lock), NULL);
         player.vcodec_context = avcodec_alloc_context3(pCodec);
         if (NULL == player.vcodec_context) {
+            pthread_mutex_destroy(&(player.vdec_context_lock));
             av_log(context, AV_LOG_ERROR, "alloc condec context failed\n");
             ret = -1;
             goto fail;
@@ -708,8 +733,10 @@ static int open_audio_decoder(AVFormatContext* context, AVStream *st) {
     AVCodec* pCodec = NULL;
     pCodec = avcodec_find_decoder(st->codecpar->codec_id);
     if (NULL != pCodec) {
+        pthread_mutex_init(&(player.adec_context_lock), NULL);
         player.acodec_context = avcodec_alloc_context3(pCodec);
         if (NULL == player.acodec_context) {
+            pthread_mutex_destroy(&(player.adec_context_lock));
             av_log(context, AV_LOG_ERROR, "alloc condec context failed\n");
             ret = -1;
             goto fail;
@@ -744,6 +771,7 @@ static int video_decoder_threadloop() {
             av_frame_unref(video_frame);
             break;
         }
+        pthread_mutex_lock(&(player.vdec_context_lock));
         //av_log(NULL, AV_LOG_ERROR, "%s, pts:%lld, dts:%lld\n", __func__, pkt.pts, pkt.dts);
         int ret_send_pkt = avcodec_send_packet(player.vcodec_context, &pkt);
         int ret_decoder = avcodec_receive_frame(player.vcodec_context, video_frame);
@@ -753,6 +781,7 @@ static int video_decoder_threadloop() {
             av_frame_unref(video_frame);
         }
         av_packet_unref(&pkt);
+        pthread_mutex_unlock(&(player.vdec_context_lock));
     }
 
     av_frame_free(&video_frame);
@@ -776,6 +805,7 @@ static int audio_decoder_threadloop() {
             av_frame_unref(audio_frame);
             break;
         }
+        pthread_mutex_lock(&player.adec_context_lock);
         avcodec_send_packet(player.acodec_context, &pkt);
         int ret_decoder = avcodec_receive_frame(player.acodec_context, audio_frame);
         if (ret_decoder >= 0 ) {
@@ -804,6 +834,7 @@ static int audio_decoder_threadloop() {
             }
         }
 go_on:
+	    pthread_mutex_unlock(&player.adec_context_lock);
         av_packet_unref(&pkt);
         av_frame_unref(filter_audio_frame);
         av_frame_unref(audio_frame);
@@ -818,15 +849,19 @@ static int get_stream_type(int stream_index) {
 }
 
 static int reset_video_decoder(AVStream* st) {
+    pthread_mutex_lock(&(player.vdec_context_lock));
     avcodec_close(player.vcodec_context);
     avcodec_free_context(&player.vcodec_context);
+    pthread_mutex_destroy(&(player.vdec_context_lock));
     player.vcodec_context = NULL;
     open_video_decoder(player.context, st);
 }
 
 static int reset_audio_decoder(AVStream* st) {
+    pthread_mutex_lock(&(player.adec_context_lock));
     avcodec_close(player.acodec_context);
     avcodec_free_context(&player.acodec_context);
+    pthread_mutex_destroy(&(player.adec_context_lock));
     player.acodec_context = NULL;
     open_audio_decoder(player.context, st);
 }
@@ -890,6 +925,8 @@ static int streams_open(const char*name) {
     AVFormatContext *context = NULL;
     player.flag_exit = 0;
     player.flag_select_track = 0;
+    player.is_full_screen = 0;
+    player.is_seeking = 0;
     pthread_mutex_init(&(player.context_lock), NULL);
     player.is_aplay_end = 0;
     if (!player.aframe_playing) {
@@ -1006,7 +1043,16 @@ static int streams_close() {
     return 0;
 }
 
+static int flush_decoders() {
+    pthread_mutex_lock((&player.vdec_context_lock));
+    avcodec_flush_buffers(player.vcodec_context);
+    pthread_mutex_unlock((&player.vdec_context_lock));
+    pthread_mutex_lock((&player.adec_context_lock));
+    avcodec_flush_buffers(player.acodec_context);
+    pthread_mutex_unlock((&player.adec_context_lock));
 
+    return 0;
+}
 
 static void main_threadloop(AVFormatContext* context) {
     AVPacket pkt;
@@ -1021,19 +1067,25 @@ static void main_threadloop(AVFormatContext* context) {
                 av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", read_ret);
                 return;
             }
-            //if (get_stream_type(pkt.stream_index) == AVMEDIA_TYPE_VIDEO) {
-            //    av_log(NULL, AV_LOG_ERROR, "video pkt(index:%d, pts:%lld, play_index:%d)\n", pkt.stream_index, pkt.pts, player.index_video_stream);
-            //}
             if (player.seek_req) {
                 int64_t start_time = player.context->start_time;
                 int64_t seek_pos = (player.seek_target == -1) ? (get_current_position()) : player.seek_target;
-                av_log(NULL, AV_LOG_ERROR, "====seek to %lld, start_time:%lld====\n", (seek_pos + 500000) / 1000000, start_time);
-                avformat_seek_file(player.context, -1, 0, seek_pos + start_time, INT64_MAX, AVSEEK_FLAG_BACKWARD);
+                int seek_ret = avformat_seek_file(player.context, -1, INT64_MIN, seek_pos + start_time, INT64_MAX, AVSEEK_FLAG_BACKWARD);
+                av_log(NULL, AV_LOG_ERROR, "====seek to %lld, start_time:%lld, seek_ret:%d====\n", (seek_pos + 500000) / 1000000, start_time, seek_ret);
                 player.seek_req = 0;
-            }
-            if (player.flag_select_track) {
+                player.is_seeking = 1;
+                player.clock.timestamp_audio_real = player.seek_target + start_time;
                 packet_queue_flush(&player.video_pkts_queue);
                 packet_queue_flush(&player.audio_pkts_queue);
+
+                flush_decoders();
+
+                frame_queue_flush(&player.video_frames_queue);
+				frame_queue_flush(&player.audio_frames_queue);
+                player.is_seeking = 0;
+                continue;
+            }
+            if (player.flag_select_track) {
                 if (pkt.stream_index == player.index_dst_track) {
                     AVStream *st_dst = player.context->streams[player.index_dst_track];
                     if (get_stream_type(player.index_dst_track) == AVMEDIA_TYPE_VIDEO) {
@@ -1159,7 +1211,7 @@ static void process_window_event(const SDL_Event * event) {
             break;
         case SDL_WINDOWEVENT_CLOSE:
             SDL_Log("Window %d closed", event->window.windowID);
-            streams_close();
+            //streams_close();
             exit(0);
             break;
 #if SDL_VERSION_ATLEAST(2, 0, 5)
@@ -1175,6 +1227,12 @@ static void process_window_event(const SDL_Event * event) {
                     event->window.windowID, event->window.event);
             break;
         }
+}
+
+static void toggle_full_screen()
+{
+    player.is_full_screen= !player.is_full_screen;
+    SDL_SetWindowFullscreen(player.video_surface.window, player.is_full_screen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 }
 
 static void eventloop() {
@@ -1193,6 +1251,23 @@ static void eventloop() {
                 av_log(NULL, AV_LOG_ERROR, "SDL Window event");
                 process_window_event(&event);
                 break;
+            case SDL_MOUSEBUTTONDOWN:
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    static int64_t last_mouse_left_click = 0;
+                    if (av_gettime_relative() - last_mouse_left_click <= 500000) {
+                        toggle_full_screen();
+                        last_mouse_left_click = 0;
+                    } else {
+                        last_mouse_left_click = av_gettime_relative();
+                    }
+                } else if (event.button.button == SDL_BUTTON_RIGHT) {
+                     double x_pos = event.button.x;
+                     int64_t seek_pos = (x_pos / player.video_surface.width) * player.context->duration;
+                     av_log(NULL, AV_LOG_ERROR, "SDL Right Button click, x:%f(%d x %d), seek_pos:%lld\n",
+                             x_pos, player.video_surface.width, player.video_surface.height, seek_pos);
+                     player.seek_req = 1;
+                     player.seek_target = seek_pos;
+                }
             default:
                 break;
         };
