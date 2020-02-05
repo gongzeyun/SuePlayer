@@ -1073,7 +1073,6 @@ static void main_threadloop(AVFormatContext* context) {
 
                 frame_queue_flush(&player.video_frames_queue);
 				frame_queue_flush(&player.audio_frames_queue);
-                player.is_seeking = 0;
             }
             if (player.flag_select_track) {
                 if (pkt.stream_index == player.index_dst_track) {
@@ -1100,6 +1099,9 @@ static void main_threadloop(AVFormatContext* context) {
             if (read_ret < 0 && read_ret != AVERROR_EOF) {
                 av_log(player.context, AV_LOG_ERROR, "read frame error\n", read_ret);
                 continue;
+            }
+            if (player.is_seeking) {
+                player.is_seeking = 0;
             }
             if (pkt.stream_index == player.index_video_stream) {
                 packet_queue_put(&player.video_pkts_queue, &pkt);
