@@ -3,6 +3,7 @@
 #include <libavfilter/avfilter.h>
 #include <libavfilter/buffersrc.h>
 #include <libavutil/opt.h>
+#include <libswscale/swscale.h>
 #include <SDL2/SDL.h>
 
 
@@ -497,11 +498,38 @@ static update_audio_filter(int samplerate, int audio_format, int channels, int c
 
 static int render_video_frame(AVFrame* frame) {
     SDL_Event event;
+    AVFrame *frame_display = frame; //default is frame
+    struct SwsContext* img_convert_ctx;
+    unsigned char *out_buffer = NULL;
     if (frame) {
+        if (frame->format != AV_PIX_FMT_YUV420P) {
+            /* convert format to yuv420p */
+            img_convert_ctx = sws_getContext(frame->width, frame->height, frame->format,
+                                                 frame->width, frame->height, AV_PIX_FMT_YUV420P, 2, NULL, NULL, NULL);
+            if (img_convert_ctx != NULL) {
+                AVFrame* frame_yuv420p = av_frame_alloc();
+                frame_yuv420p->width = frame->width;
+                frame_yuv420p->height = frame->height;
+                out_buffer = (unsigned char *)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_YUV420P, frame->width, frame->height, 1));
+                av_image_fill_arrays(frame_yuv420p->data, frame_yuv420p->linesize, out_buffer,AV_PIX_FMT_YUV420P, frame->width, frame->height, 1);
+                sws_scale(img_convert_ctx, frame->data, frame->linesize, 0, frame->height, frame_yuv420p->data, frame_yuv420p->linesize);
+                frame_display = frame_yuv420p;
+            } else {
+                av_log(NULL, AV_LOG_ERROR, "%s:create format converter failed\n", __func__);
+            }
+        }
         SDL_PollEvent(&event);
-        SDL_UpdateYUVTexture(player.video_surface.texture, NULL, frame->data[0], frame->linesize[0],
-                              frame->data[1], frame->linesize[1],
-                              frame->data[2], frame->linesize[2]);
+        SDL_UpdateYUVTexture(player.video_surface.texture, NULL, frame_display->data[0], frame_display->linesize[0],
+                              frame_display->data[1], frame_display->linesize[1],
+                              frame_display->data[2], frame_display->linesize[2]);
+
+        if (frame_display != frame) {
+            /* frame_display was alloced by format converter, free here*/
+            av_frame_unref(frame_display);
+            av_frame_free(frame_display);
+            av_free(out_buffer);
+            sws_freeContext(img_convert_ctx);
+        }
         SDL_Rect sdlRect;
         sdlRect.x = 0;
         sdlRect.y = 0;
@@ -548,7 +576,7 @@ static void video_refresh() {
             int64_t av_diff = timestamp_video_real - player.clock.timestamp_audio_real;
             player.clock.timestamp_video_real = timestamp_video_real;
             player.clock.timestamp_video_stream = frame_refesh->pkt_dts;
-            av_log(NULL, AV_LOG_ERROR,"av diff:%lldms, video_real:%lld, audio_real:%lld\n", av_diff / 1000, timestamp_video_real, player.clock.timestamp_audio_real);
+            //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms, video_real:%lld, audio_real:%lld\n", av_diff / 1000, timestamp_video_real, player.clock.timestamp_audio_real);
             if (av_diff > -50000 && !player.is_seeking) {
                 int64_t sleep_us = av_diff > 0 ? av_diff : 0;
                 usleep(sleep_us);
@@ -718,7 +746,7 @@ static int open_video_decoder(AVFormatContext* context, AVStream *st) {
         }
         avcodec_parameters_to_context(player.vcodec_context, st->codecpar);
     }
-    ret = avcodec_open2(player.vcodec_context, NULL, NULL);
+    ret = avcodec_open2(player.vcodec_context, pCodec, NULL);
     if (0 == ret) {
         av_log(player.context, AV_LOG_DEBUG, "%s, open decoder ==%s== success\n", __func__, pCodec->name);
     }
@@ -777,6 +805,7 @@ static int video_decoder_threadloop() {
         int ret_decoder = avcodec_receive_frame(player.vcodec_context, video_frame);
         if (ret_decoder >= 0) {
             //av_log(NULL, AV_LOG_ERROR, "%s, pts:%lld, dts:%lld\n", __func__, video_frame->pts, video_frame->pkt_dts);
+            //dump_frame(video_frame);
             frame_queue_put(&player.video_frames_queue, video_frame);
             av_frame_unref(video_frame);
         }
@@ -963,7 +992,7 @@ static int streams_open(const char*name) {
 
     player.video_surface.width = player.video_width;
     player.video_surface.height = player.video_height;
-
+    av_log(NULL, AV_LOG_ERROR, "video width:%d, video height:%d\n", player.video_width, player.video_height);
     ret = open_video_decoder(context, st_video);
     if (ret < 0) {
         av_log(context, AV_LOG_ERROR, "%s, open video decoder failed\n", __func__);
