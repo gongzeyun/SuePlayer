@@ -133,6 +133,7 @@ typedef struct AVPlayer {
     int flag_select_track;
 
     int is_full_screen;
+    int paused;
 }AVPlayer;
 
 static const struct TextureFormatEntry {
@@ -256,7 +257,7 @@ static int frame_queue_get(SueFrameRingQueue* frame_queue, AVFrame* frame) {
             read_space = (frame_queue->pos_write - frame_queue->pos_read + NUM_FRAMES_RING_BUFFER) % (NUM_FRAMES_RING_BUFFER);
         }
         //av_log(NULL, AV_LOG_ERROR, "====read, pos_write:%d, pos_read:%d, read_space:%d, abort:%d\n", frame_queue->pos_write, frame_queue->pos_read, read_space, frame_queue->abort);
-        if (read_space < 1) {
+        if (read_space < 1 || player.paused) {
             pthread_mutex_unlock(&(frame_queue->ring_queue_lock));
             usleep(5 * 1000);
             continue;
@@ -481,9 +482,6 @@ end:
     return ret;
 }
 static update_audio_filter(int samplerate, int audio_format, int channels, int channel_layout) {
-    //av_log(NULL, AV_LOG_ERROR, "sample(new:%d, old:%d), format(new:%d, old:%d), channels(new:%d, old:%d), layouts(new:%d, old:%d)\n",
-    //        samplerate, player.audio_samplerate, audio_format, player.audio_format, channels, player.audio_channels,
-    //        channel_layout, player.audio_channel_layout);
     if (samplerate != player.audio_samplerate || audio_format != player.audio_format ||
         channels != player.audio_channels || channel_layout != player.audio_channel_layout) {
         av_log(NULL, AV_LOG_ERROR, "reconfig audio filter\n");
@@ -579,7 +577,7 @@ static void video_refresh() {
             player.clock.timestamp_video_stream = frame_refesh->pkt_dts;
             //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms, video_real:%lld, audio_real:%lld\n", av_diff / 1000, timestamp_video_real, player.clock.timestamp_audio_real);
             if (av_diff > 3000000) {
-                av_log(NULL, AV_LOG_ERROR, "video too early, drop!av_diff:%lld\n", av_diff);
+                av_log(NULL, AV_LOG_ERROR, "video too early, drop!av_diff:%lldus\n", av_diff);
                 av_frame_unref(frame_refesh);
                 continue;
             }
@@ -870,7 +868,7 @@ static int audio_decoder_threadloop() {
             }
         }
 go_on:
-	    pthread_mutex_unlock(&player.adec_context_lock);
+        pthread_mutex_unlock(&player.adec_context_lock);
         av_packet_unref(&pkt);
         av_frame_unref(filter_audio_frame);
         av_frame_unref(audio_frame);
@@ -963,6 +961,7 @@ static int streams_open(const char*name) {
     player.flag_select_track = 0;
     player.is_full_screen = 0;
     player.is_seeking = 0;
+    player.paused = 0;
     pthread_mutex_init(&(player.context_lock), NULL);
     player.is_aplay_end = 0;
     if (!player.aframe_playing) {
@@ -1107,7 +1106,7 @@ static void main_threadloop(AVFormatContext* context) {
                 flush_decoders();
 
                 frame_queue_flush(&player.video_frames_queue);
-				frame_queue_flush(&player.audio_frames_queue);
+                frame_queue_flush(&player.audio_frames_queue);
             }
             if (player.flag_select_track) {
                 if (pkt.stream_index == player.index_dst_track) {
@@ -1149,7 +1148,9 @@ static void main_threadloop(AVFormatContext* context) {
     return;
 }
 
-
+static int toggle_pause_player() {
+    player.paused = !player.paused;
+}
 static void process_key_event(const SDL_Event * event) {
     int index_stream_selected = 0;
     switch (event->key.keysym.sym) {
@@ -1189,6 +1190,21 @@ static void process_key_event(const SDL_Event * event) {
             index_stream_selected = 8;
 select_track:
            select_tracks(index_stream_selected);
+           break;
+        case SDLK_SPACE:
+          toggle_pause_player();
+           av_log(NULL, AV_LOG_ERROR, "Space key down\n");
+           break;
+       case SDLK_LEFT:
+            player.seek_req = 1;
+            player.seek_target = get_current_position() - 10000000; //10s
+            av_log(NULL, AV_LOG_ERROR, "Left key down\n");
+            break;
+       case SDLK_RIGHT:
+            player.seek_req = 1;
+            player.seek_target = get_current_position() + 10000000; //10s
+            av_log(NULL, AV_LOG_ERROR, "Right key down\n");
+            break;
     };
 }
 static void process_window_event(const SDL_Event * event) {
@@ -1279,16 +1295,14 @@ static void eventloop() {
                 break;
             case SDL_KEYDOWN:
                process_key_event(&event);
-               av_log(NULL, AV_LOG_ERROR, "SDL Key event");
                break;
             case SDL_WINDOWEVENT:
-                av_log(NULL, AV_LOG_ERROR, "SDL Window event");
                 process_window_event(&event);
                 break;
             case SDL_MOUSEBUTTONDOWN:
                 if (event.button.button == SDL_BUTTON_LEFT) {
                     static int64_t last_mouse_left_click = 0;
-                    if (av_gettime_relative() - last_mouse_left_click <= 500000) {
+                    if (last_mouse_left_click != 0 && av_gettime_relative() - last_mouse_left_click <= 500000) {
                         toggle_full_screen();
                         last_mouse_left_click = 0;
                     } else {
