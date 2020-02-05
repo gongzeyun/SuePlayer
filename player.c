@@ -486,6 +486,7 @@ static update_audio_filter(int samplerate, int audio_format, int channels, int c
     //        channel_layout, player.audio_channel_layout);
     if (samplerate != player.audio_samplerate || audio_format != player.audio_format ||
         channels != player.audio_channels || channel_layout != player.audio_channel_layout) {
+        av_log(NULL, AV_LOG_ERROR, "reconfig audio filter\n");
         avfilter_graph_free(&player.audio_graph);
         player.audio_graph = NULL;
         init_audio_filter(samplerate, audio_format, channels, channel_layout);
@@ -577,6 +578,11 @@ static void video_refresh() {
             player.clock.timestamp_video_real = timestamp_video_real;
             player.clock.timestamp_video_stream = frame_refesh->pkt_dts;
             //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms, video_real:%lld, audio_real:%lld\n", av_diff / 1000, timestamp_video_real, player.clock.timestamp_audio_real);
+            if (av_diff > 3000000) {
+                av_log(NULL, AV_LOG_ERROR, "video too early, drop!av_diff:%lld\n", av_diff);
+                av_frame_unref(frame_refesh);
+                continue;
+            }
             if (av_diff > -50000 && !player.is_seeking) {
                 int64_t sleep_us = av_diff > 0 ? av_diff : 0;
                 usleep(sleep_us);
@@ -773,6 +779,7 @@ static int open_audio_decoder(AVFormatContext* context, AVStream *st) {
         player.audio_channels = st->codecpar->channels;
         player.audio_format = st->codecpar->format;
         player.audio_channel_layout = st->codecpar->channel_layout;
+        init_audio_filter(player.audio_samplerate, player.audio_format, player.audio_channels, player.audio_channel_layout);
         avcodec_parameters_to_context(player.acodec_context, st->codecpar);
     }
     ret = avcodec_open2(player.acodec_context, NULL, NULL);
@@ -1011,7 +1018,6 @@ static int streams_open(const char*name) {
         goto fail;
     }
     packet_queue_init(&player.audio_pkts_queue);
-    init_audio_filter(player.audio_samplerate, player.audio_format, player.audio_channels, player.audio_channel_layout);
     frame_queue_init(&player.audio_frames_queue);
     player.audio_decoder_thread = SDL_CreateThread(audio_decoder_threadloop, "audio_decoder_threadloop", context);
 fail:
