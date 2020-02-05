@@ -1058,15 +1058,6 @@ static void main_threadloop(AVFormatContext* context) {
     AVPacket pkt;
     int read_ret;
     while(!player.flag_exit) {
-            pthread_mutex_lock(&(player.context_lock));
-            if (player.context) {
-                read_ret = av_read_frame(player.context, &pkt);
-            }
-            pthread_mutex_unlock(&(player.context_lock));
-            if (read_ret < 0) {
-                av_log(player.context, AV_LOG_ERROR, "read packet failed, ret:%d\n", read_ret);
-                return;
-            }
             if (player.seek_req) {
                 int64_t start_time = player.context->start_time;
                 int64_t seek_pos = (player.seek_target == -1) ? (get_current_position()) : player.seek_target;
@@ -1083,7 +1074,6 @@ static void main_threadloop(AVFormatContext* context) {
                 frame_queue_flush(&player.video_frames_queue);
 				frame_queue_flush(&player.audio_frames_queue);
                 player.is_seeking = 0;
-                continue;
             }
             if (player.flag_select_track) {
                 if (pkt.stream_index == player.index_dst_track) {
@@ -1100,9 +1090,16 @@ static void main_threadloop(AVFormatContext* context) {
                         st_src->discard = AVDISCARD_ALL;
                     }
                     player.flag_select_track = 0;
-                } else {
-                    continue;
                 }
+            }
+            pthread_mutex_lock(&(player.context_lock));
+            if (player.context) {
+                read_ret = av_read_frame(player.context, &pkt);
+            }
+            pthread_mutex_unlock(&(player.context_lock));
+            if (read_ret < 0 && read_ret != AVERROR_EOF) {
+                av_log(player.context, AV_LOG_ERROR, "read frame error\n", read_ret);
+                continue;
             }
             if (pkt.stream_index == player.index_video_stream) {
                 packet_queue_put(&player.video_pkts_queue, &pkt);
