@@ -34,6 +34,8 @@ typedef struct AudioRender {
 
 typedef struct SueFrame {
     AVFrame* frame;
+    int serial;
+    AVSubtitle *subtitle;
 }SueFrame;
 
 typedef struct SueFrameRingQueue {
@@ -204,7 +206,7 @@ static int frame_queue_destroy(SueFrameRingQueue* frame_queue) {
     pthread_mutex_destroy(&(frame_queue->ring_queue_lock), NULL);
 }
 
-static int frame_queue_put(SueFrameRingQueue* frame_queue, AVFrame* frame) {
+static int frame_queue_put(SueFrameRingQueue* frame_queue, AVFrame* frame, int pkt_serial) {
     int ret = -1;
 
     int write_space = 0;
@@ -224,6 +226,7 @@ static int frame_queue_put(SueFrameRingQueue* frame_queue, AVFrame* frame) {
         }
         av_frame_unref(frame_queue->sue_frames[frame_queue->pos_write].frame);
         av_frame_move_ref(frame_queue->sue_frames[frame_queue->pos_write].frame, frame);
+        frame_queue->sue_frames[frame_queue->pos_write].serial = pkt_serial;
         //av_log(NULL, AV_LOG_ERROR, "====write frame(pts:%lld) success, serial:%d\n",
         //          frame_queue->sue_frames[frame_queue->pos_write].frame->pts, frame_queue->sue_frames[frame_queue->pos_write].serial);
         if (frame_queue->pos_read == -1) {
@@ -245,7 +248,7 @@ exit:
 }
 
 
-static int frame_queue_get(SueFrameRingQueue* frame_queue, AVFrame* frame) {
+static int frame_queue_get(SueFrameRingQueue* frame_queue, AVFrame* frame, int *serial) {
     int ret = -1;
     int read_space;
     while (!frame_queue->abort) {
@@ -264,7 +267,7 @@ static int frame_queue_get(SueFrameRingQueue* frame_queue, AVFrame* frame) {
         }
         av_frame_unref(frame);
         av_frame_move_ref(frame, frame_queue->sue_frames[frame_queue->pos_read].frame);
-
+        *serial = frame_queue->sue_frames[frame_queue->pos_read].serial;
         int temp_pos_read = frame_queue->pos_read;
         frame_queue->pos_read++;
         frame_queue->pos_read %= NUM_FRAMES_RING_BUFFER;
@@ -324,7 +327,7 @@ static int packet_queue_put(PacketQueue *queue, AVPacket *pkt) {
     return ret;
 }
 
-static int packet_queue_get(PacketQueue *queue, AVPacket* pkt) {
+static int packet_queue_get(PacketQueue *queue, AVPacket* pkt, int *serial) {
     int ret = -1;
     while (!queue->abort) {
         pthread_mutex_lock(&(queue->queue_lock));
@@ -336,7 +339,8 @@ static int packet_queue_get(PacketQueue *queue, AVPacket* pkt) {
             if (queue->first_pkt == NULL) {
                 queue->last_pkt = NULL;
             }
-            //av_log(NULL, AV_LOG_ERROR, "dequeue pkt(stream:%d, pts:%lld) success, serial:%d\n", pkt->stream_index, pkt->pts, sue_pkt->serial);
+            *serial = sue_pkt->serial;
+            //av_log(NULL, AV_LOG_ERROR, "dequeue pkt(stream:%d, pts:%lld, serial:%d) success\n", pkt->stream_index, pkt->pts, *serial);
             av_free(sue_pkt);
             ret = 0;
             break;
@@ -565,7 +569,7 @@ static void video_refresh() {
     }
     int serial = 0;
     for (;;) {
-        ret = frame_queue_get(&player.video_frames_queue, frame_refesh);
+        ret = frame_queue_get(&player.video_frames_queue, frame_refesh, &serial);
         if (ret == 0) {
             int64_t ts_stream = frame_refesh->pts;
             if (ts_stream == AV_NOPTS_VALUE)
@@ -576,8 +580,8 @@ static void video_refresh() {
             player.clock.timestamp_video_real = timestamp_video_real;
             player.clock.timestamp_video_stream = frame_refesh->pkt_dts;
             //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms, video_real:%lld, audio_real:%lld\n", av_diff / 1000, timestamp_video_real, player.clock.timestamp_audio_real);
-            if (av_diff > 3000000) {
-                av_log(NULL, AV_LOG_ERROR, "video too early, drop!av_diff:%lldus\n", av_diff);
+            if (serial != player.video_pkts_queue.serial) {
+                av_log(NULL, AV_LOG_ERROR, "%s:serial is different(frame_serial:%d, queue_serial:%d), drop!\n", __func__, serial, player.video_pkts_queue.serial);
                 av_frame_unref(frame_refesh);
                 continue;
             }
@@ -677,8 +681,11 @@ static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
         while (len > 0) {
             int ret;
             if (player.pos_abuffer_read >= player.pos_abuffer_tail) {
-                ret = frame_queue_get(&player.audio_frames_queue, player.aframe_playing);
-                if (ret == 0) {
+                ret = frame_queue_get(&player.audio_frames_queue, player.aframe_playing, &serial);
+                if (serial != player.audio_pkts_queue.serial) {
+                    av_log(NULL, AV_LOG_ERROR, "%s: serial is different(frame_serial:%d, queue_serial:%d), drop!\n", __func__, serial, player.audio_pkts_queue.serial);
+                }
+                if (ret == 0 && serial == player.audio_pkts_queue.serial) {
                     player.pos_abuffer_read = 0;
                     player.pos_abuffer_tail = 2 * player.aframe_playing->nb_samples * av_get_channel_layout_nb_channels(player.aframe_playing->channel_layout);
                 } else {
@@ -694,8 +701,7 @@ static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
             player.pos_abuffer_read += length_read;
             len -= length_read;
             //av_log(NULL, AV_LOG_ERROR, "%s, pts:%lld, is_seeking:%d\n", __func__, player.aframe_playing->pkt_pts, player.is_seeking);
-            if (!player.is_seeking)
-                update_audio_clock(player.aframe_playing->pkt_pts);
+            update_audio_clock(player.aframe_playing->pkt_pts);
         }
     }
 }
@@ -798,7 +804,8 @@ static int video_decoder_threadloop() {
         return -1;
     }
     for (;;) {
-        ret = packet_queue_get(&player.video_pkts_queue, &pkt);
+        int *serial = -1;
+        ret = packet_queue_get(&player.video_pkts_queue, &pkt, &serial);
         if (-1 == ret) {
             av_packet_unref(&pkt);
             av_frame_unref(video_frame);
@@ -811,7 +818,7 @@ static int video_decoder_threadloop() {
         if (ret_decoder >= 0) {
             //av_log(NULL, AV_LOG_ERROR, "%s, pts:%lld, dts:%lld\n", __func__, video_frame->pts, video_frame->pkt_dts);
             //dump_frame(video_frame);
-            frame_queue_put(&player.video_frames_queue, video_frame);
+            frame_queue_put(&player.video_frames_queue, video_frame, serial);
             av_frame_unref(video_frame);
         }
         av_packet_unref(&pkt);
@@ -832,7 +839,8 @@ static int audio_decoder_threadloop() {
         return -1;
     }
     for(;;) {
-        ret = packet_queue_get(&player.audio_pkts_queue, &pkt);
+        int serial = -1;
+        ret = packet_queue_get(&player.audio_pkts_queue, &pkt, &serial);
         if (-1 == ret) {
             av_packet_unref(&pkt);
             av_frame_unref(filter_audio_frame);
@@ -858,7 +866,7 @@ static int audio_decoder_threadloop() {
                     int size_audio_sample = 2 * filter_audio_frame->nb_samples * av_get_channel_layout_nb_channels(filter_audio_frame->channel_layout);
                     //av_log(NULL, AV_LOG_ERROR, "get audio samples %d bytes from audio filter\n", size_audio_sample);
                     //dump_audio(filter_audio_frame->data[0], size_audio_sample);
-                    frame_queue_put(&player.audio_frames_queue, filter_audio_frame);
+                    frame_queue_put(&player.audio_frames_queue, filter_audio_frame, serial);
                     av_frame_unref(filter_audio_frame);
                     av_frame_unref(audio_frame);
                 } else {
@@ -1099,7 +1107,6 @@ static void main_threadloop(AVFormatContext* context) {
                 av_log(NULL, AV_LOG_ERROR, "====seek to %lld, start_time:%lld, seek_ret:%d====\n", (seek_pos + 500000) / 1000000, start_time, seek_ret);
                 player.seek_req = 0;
                 player.is_seeking = 1;
-                player.clock.timestamp_audio_real = player.seek_target + start_time;
                 packet_queue_flush(&player.video_pkts_queue);
                 packet_queue_flush(&player.audio_pkts_queue);
 
@@ -1107,6 +1114,7 @@ static void main_threadloop(AVFormatContext* context) {
 
                 frame_queue_flush(&player.video_frames_queue);
                 frame_queue_flush(&player.audio_frames_queue);
+                player.clock.timestamp_audio_real = seek_pos + start_time;
             }
             if (player.flag_select_track) {
                 if (pkt.stream_index == player.index_dst_track) {
