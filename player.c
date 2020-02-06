@@ -582,11 +582,12 @@ static void subtitle_display() {
             int64_t ts_stream = frame_refesh->pts;
             if (ts_stream == AV_NOPTS_VALUE)
                 ts_stream = frame_refesh->pkt_dts;
-            int64_t timestamp_video_real = av_rescale_q(ts_stream,
-                                                        player.context->streams[player.index_video_stream]->time_base,AV_TIME_BASE_Q);
-            int64_t av_diff = timestamp_video_real - player.clock.timestamp_audio_real;
-            //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms, sub_real:%lld, audio_real:%lld\n", av_diff / 1000, timestamp_video_real, player.clock.timestamp_audio_real);
-            if (serial != player.video_pkts_queue.serial) {
+            int64_t timestamp_subtitle_real = av_rescale_q(ts_stream,
+                                                        player.context->streams[player.index_subtitle_stream]->time_base,AV_TIME_BASE_Q);
+            int64_t av_diff = timestamp_subtitle_real - player.clock.timestamp_audio_real;
+            //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms, sub_real:%lld, audio_real:%lld, start_time:%lld\n", av_diff / 1000, 
+	        //              timestamp_subtitle_real, player.clock.timestamp_audio_real, player.context->streams[player.index_subtitle_stream]->start_time);
+            if (serial != player.sub_pkts_queue.serial) {
                 av_log(NULL, AV_LOG_ERROR, "%s:serial is different(frame_serial:%d, queue_serial:%d), drop!\n", __func__, serial, player.sub_pkts_queue.serial);
                 av_frame_unref(frame_refesh);
                 continue;
@@ -594,7 +595,7 @@ static void subtitle_display() {
             if (av_diff > -50000 && !player.is_seeking) {
                 int64_t sleep_us = av_diff > 0 ? av_diff : 0;
                 usleep(sleep_us);
-                av_log(NULL, AV_LOG_ERROR, "%s:text:%s\n", __func__, frame_refesh->data[0]);
+                //av_log(NULL, AV_LOG_ERROR, "%s:text:%s\n", __func__, frame_refesh->data[0]);
                 update_window_title(frame_refesh->data[0]);
                 av_free(frame_refesh->data[0]);
             }
@@ -992,9 +993,8 @@ static int subtitle_decoder_threadloop() {
         int ret_decoder = avcodec_decode_subtitle2(player.scodec_context, &sub_frame, &got_sub, &pkt);
         if (ret_decoder >= 0) {
             if (got_sub) {
-                //av_log(NULL, AV_LOG_ERROR, "%s:pts:%lld\n", __func__, sub_frame.pts);
                 if (sub_frame.pts == AV_NOPTS_VALUE) {
-                    sub_frame.pts = pkt.dts;
+                    sub_frame.pts = pkt.pts;
                 }
                 subtitle_frame->pts = sub_frame.pts;
                 AVSubtitleRect* rect = sub_frame.rects[0];
