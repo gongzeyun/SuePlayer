@@ -586,7 +586,7 @@ static void subtitle_display() {
                                                         player.context->streams[player.index_subtitle_stream]->time_base,AV_TIME_BASE_Q);
             int64_t av_diff = timestamp_subtitle_real - player.clock.timestamp_audio_real;
             //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms, sub_real:%lld, audio_real:%lld, start_time:%lld\n", av_diff / 1000, 
-	        //              timestamp_subtitle_real, player.clock.timestamp_audio_real, player.context->streams[player.index_subtitle_stream]->start_time);
+            //              timestamp_subtitle_real, player.clock.timestamp_audio_real, player.context->streams[player.index_subtitle_stream]->start_time);
             if (serial != player.sub_pkts_queue.serial) {
                 av_log(NULL, AV_LOG_ERROR, "%s:serial is different(frame_serial:%d, queue_serial:%d), drop!\n", __func__, serial, player.sub_pkts_queue.serial);
                 av_frame_unref(frame_refesh);
@@ -595,8 +595,12 @@ static void subtitle_display() {
             if (av_diff > -50000 && !player.is_seeking) {
                 int64_t sleep_us = av_diff > 0 ? av_diff : 0;
                 usleep(sleep_us);
-                //av_log(NULL, AV_LOG_ERROR, "%s:text:%s\n", __func__, frame_refesh->data[0]);
+                int64_t time_display_duration = av_rescale_q(frame_refesh->pkt_duration,
+                                                        player.context->streams[player.index_subtitle_stream]->time_base,AV_TIME_BASE_Q);
+                //av_log(NULL, AV_LOG_ERROR, "%s:subtitle display duration:%lld\n", __func__, time_display_duration);
                 update_window_title(frame_refesh->data[0]);
+                usleep(time_display_duration + 500000); //500ms is a experienced value
+                update_window_title("");
                 av_free(frame_refesh->data[0]);
             }
             av_frame_unref(frame_refesh);
@@ -966,13 +970,19 @@ go_on:
 
 static int get_text_from_ass(const char*ass, char* text) {
     int pos_last_comma = 0;
+    int pos_last_close_brace = 0;
     for (int i = 0; i < strlen(ass); i++) {
         if (ass[i] == ',') {
             pos_last_comma = i;
         }
+        if (ass[i] == '}') {
+            pos_last_close_brace = i;
+        }
     }
+
+    int pos_text_start = (pos_last_close_brace != 0) ? (pos_last_close_brace + 1) : (pos_last_comma + 1);
     av_log(NULL, AV_LOG_ERROR, "find last comma pos:%d\n", pos_last_comma);
-    strncpy(text, ass + pos_last_comma + 1, strlen(ass) - pos_last_comma - 3);
+    strncpy(text, ass + pos_text_start, strlen(ass) - pos_text_start - 2);
 
     return 0;
 }
@@ -1004,11 +1014,12 @@ static int subtitle_decoder_threadloop() {
                      get_text_from_ass(rect->ass, text);
                      subtitle_frame->width = 480;
                      subtitle_frame->height = 320;
+                     subtitle_frame->pkt_duration = pkt.duration;
                      unsigned char *out_buffer = (unsigned char *)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_GRAY8, subtitle_frame->width, subtitle_frame->height, 1));
                      memcpy(out_buffer, text, 2048);
                      av_image_fill_arrays(subtitle_frame->data, subtitle_frame->linesize, out_buffer,AV_PIX_FMT_GRAY8, subtitle_frame->width, subtitle_frame->height, 1);
-                     //av_log(NULL, AV_LOG_ERROR, "%s:ass text:%s, start_time:%d, end_time:%d, pts:%lld\n", __func__, 
-                     //         subtitle_frame->data[0], sub_frame.start_display_time, sub_frame.end_display_time, sub_frame.pts);
+                     //av_log(NULL, AV_LOG_ERROR, "%s:text:%s, start_time:%d, end_time:%d, pts:%lld, duration:%d\n", __func__, 
+                     //         subtitle_frame->data[0], sub_frame.start_display_time, sub_frame.end_display_time, sub_frame.pts, subtitle_frame->pkt_duration);
                      frame_queue_put(&player.sub_frames_queue, subtitle_frame, serial);
                      //av_free(out_buffer);
                 }
