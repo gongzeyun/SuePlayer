@@ -1071,9 +1071,9 @@ static void get_defalut_tracks(AVFormatContext* context) {
     int is_vstream_find = 0;
     int is_astream_find = 0;
     int is_sstream_find = 0;
-    player.index_video_stream = AVMEDIA_TYPE_VIDEO;
-    player.index_audio_stream = AVMEDIA_TYPE_AUDIO;
-    player.index_subtitle_stream = AVMEDIA_TYPE_SUBTITLE;
+    player.index_video_stream = -1;
+    player.index_audio_stream = -1;
+    player.index_subtitle_stream = -1;
     for (int i = 0; i < context->nb_streams; i++) {
         enum AVMediaType stream_type = context->streams[i]->codecpar->codec_type;
         av_log(NULL, AV_LOG_ERROR, "%s: stream:%d type:%d\n", __func__, i, stream_type);
@@ -1146,34 +1146,43 @@ static int streams_open(const char*name) {
 
     AVStream* st_subtitle = (context)->streams[player.index_subtitle_stream];
 
-
-    ret = open_video_decoder(context, st_video);
-    if (ret < 0) {
-        av_log(context, AV_LOG_ERROR, "%s, open video decoder failed\n", __func__);
-        avformat_close_input(&context);
-        goto fail;
+    if (player.index_video_stream >= 0) {
+        ret = open_video_decoder(context, st_video);
+        if (ret < 0) {
+            av_log(context, AV_LOG_ERROR, "%s, open video decoder failed\n", __func__);
+            avformat_close_input(&context);
+            goto fail;
+        }
+        packet_queue_init(&player.video_pkts_queue);
+        frame_queue_init(&player.video_frames_queue);
+        player.video_decoder_thread = SDL_CreateThread(video_decoder_threadloop, "video_decoder_threadloop", context);
+        player.video_refresh = SDL_CreateThread(video_refresh, "video_refresh", context);
     }
-    packet_queue_init(&player.video_pkts_queue);
-    frame_queue_init(&player.video_frames_queue);
-    player.video_decoder_thread = SDL_CreateThread(video_decoder_threadloop, "video_decoder_threadloop", context);
-    player.video_refresh = SDL_CreateThread(video_refresh, "video_refresh", context);
 
-
-    ret = open_audio_decoder(context, st_audio);
-    if (ret < 0) {
-        av_log(context, AV_LOG_ERROR, "%s, open audio decoder failed\n", __func__);
-        goto fail;
+    if (player.index_audio_stream >= 0) {
+        ret = open_audio_decoder(context, st_audio);
+        if (ret < 0) {
+            av_log(context, AV_LOG_ERROR, "%s, open audio decoder failed\n", __func__);
+            avformat_close_input(&context);
+            goto fail;
+        }
+        packet_queue_init(&player.audio_pkts_queue);
+        frame_queue_init(&player.audio_frames_queue);
+        player.audio_decoder_thread = SDL_CreateThread(audio_decoder_threadloop, "audio_decoder_threadloop", context);
     }
-    packet_queue_init(&player.audio_pkts_queue);
-    frame_queue_init(&player.audio_frames_queue);
-    player.audio_decoder_thread = SDL_CreateThread(audio_decoder_threadloop, "audio_decoder_threadloop", context);
 
-    
-    ret = open_subtitle_decoder(context, st_subtitle);
-    packet_queue_init(&player.sub_pkts_queue);
-    frame_queue_init(&player.sub_frames_queue);
-    player.video_decoder_thread = SDL_CreateThread(subtitle_decoder_threadloop, "subtitle_decoder_threadloop", context);
-    player.video_refresh = SDL_CreateThread(subtitle_display, "subtitle_display", context);
+    if (player.index_subtitle_stream >= 0) {
+        ret = open_subtitle_decoder(context, st_subtitle);
+        if (ret < 0) {
+            av_log(context, AV_LOG_ERROR, "%s, open subtitle decoder failed\n", __func__);
+            avformat_close_input(&context);
+            goto fail;
+        }
+        packet_queue_init(&player.sub_pkts_queue);
+        frame_queue_init(&player.sub_frames_queue);
+        player.video_decoder_thread = SDL_CreateThread(subtitle_decoder_threadloop, "subtitle_decoder_threadloop", context);
+        player.video_refresh = SDL_CreateThread(subtitle_display, "subtitle_display", context);
+    }
 fail:
     pthread_mutex_unlock(&(player.context_lock));
     return ret;
