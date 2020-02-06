@@ -90,12 +90,15 @@ typedef struct AVPlayer {
     pthread_mutex_t vdec_context_lock;
     AVCodecContext* acodec_context;
     pthread_mutex_t adec_context_lock;
+    AVCodecContext* scodec_context;
+	pthread_mutex_t sdec_context_lock;
     /* video info */
     int video_width;
     int video_height;
 
     int index_video_stream;
     int index_audio_stream;
+    int index_subtitle_stream;
     /* audio info */
     int audio_samplerate;
     int audio_channels;
@@ -114,9 +117,11 @@ typedef struct AVPlayer {
 
     PacketQueue video_pkts_queue;
     PacketQueue audio_pkts_queue;
+    PacketQueue sub_pkts_queue;
 
     SueFrameRingQueue video_frames_queue;
     SueFrameRingQueue audio_frames_queue;
+    SueFrameRingQueue sub_frames_queue;
 
     int is_aplay_end;
     int pos_abuffer_read;
@@ -396,7 +401,6 @@ int dump_frame(AVFrame* frame)
     fclose(pFile);
 }
 
-
 int dump_audio_sdl(Uint8* data, int length)
 {
     FILE* pFile;
@@ -559,6 +563,48 @@ static int update_video_render(int width, int height, int pixel_format) {
         SDL_UnlockTexture(player.video_surface.texture);
     }
     av_log(NULL, AV_LOG_VERBOSE, "Created %dx%d texture with %s.\n", width, height, SDL_GetPixelFormatName(pixel_format));
+}
+
+static void update_window_title(const char* title) {
+	SDL_SetWindowTitle(player.video_surface.window, title);
+}
+
+static void subtitle_display() {
+    int ret;
+    AVFrame* frame_refesh = av_frame_alloc();
+    if (!frame_refesh) {
+        return;
+    }
+    int serial = 0;
+    for (;;) {
+        ret = frame_queue_get(&player.sub_frames_queue, frame_refesh, &serial);
+        if (ret == 0) {
+            int64_t ts_stream = frame_refesh->pts;
+            if (ts_stream == AV_NOPTS_VALUE)
+                ts_stream = frame_refesh->pkt_dts;
+            int64_t timestamp_video_real = av_rescale_q(ts_stream,
+                                                        player.context->streams[player.index_video_stream]->time_base,AV_TIME_BASE_Q);
+            int64_t av_diff = timestamp_video_real - player.clock.timestamp_audio_real;
+            //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms, sub_real:%lld, audio_real:%lld\n", av_diff / 1000, timestamp_video_real, player.clock.timestamp_audio_real);
+            if (serial != player.video_pkts_queue.serial) {
+                av_log(NULL, AV_LOG_ERROR, "%s:serial is different(frame_serial:%d, queue_serial:%d), drop!\n", __func__, serial, player.sub_pkts_queue.serial);
+                av_frame_unref(frame_refesh);
+                continue;
+            }
+            if (av_diff > -50000 && !player.is_seeking) {
+                int64_t sleep_us = av_diff > 0 ? av_diff : 0;
+                usleep(sleep_us);
+                av_log(NULL, AV_LOG_ERROR, "%s:text:%s\n", __func__, frame_refesh->data[0]);
+                update_window_title(frame_refesh->data[0]);
+            }
+            av_frame_unref(frame_refesh);
+        } else {
+            break;
+        }
+    }
+
+    av_frame_free(&frame_refesh);
+    av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
 }
 
 static void video_refresh() {
@@ -756,6 +802,11 @@ static int open_video_decoder(AVFormatContext* context, AVStream *st) {
         }
         avcodec_parameters_to_context(player.vcodec_context, st->codecpar);
     }
+    player.video_width = st->codecpar->width;
+    player.video_height = st->codecpar->height;
+    player.video_surface.width = player.video_width;
+    player.video_surface.height = player.video_height;
+    av_log(NULL, AV_LOG_ERROR, "video width:%d, video height:%d\n", player.video_width, player.video_height);
     ret = avcodec_open2(player.vcodec_context, pCodec, NULL);
     if (0 == ret) {
         av_log(player.context, AV_LOG_DEBUG, "%s, open decoder ==%s== success\n", __func__, pCodec->name);
@@ -788,14 +839,39 @@ static int open_audio_decoder(AVFormatContext* context, AVStream *st) {
     }
     ret = avcodec_open2(player.acodec_context, NULL, NULL);
     if (0 == ret) {
-        av_log(player.context, AV_LOG_DEBUG, "%s, open decoder [%s] success\n", __func__, pCodec->name);
-        av_log(player.context , AV_LOG_DEBUG, "audio params (channels:%d, samplerate:%d, format:%d, channel_layout:0x%x)\n", 
+        av_log(player.context, AV_LOG_ERROR, "%s, open decoder [%s] success\n", __func__, pCodec->name);
+        av_log(player.context , AV_LOG_ERROR, "audio params (channels:%d, samplerate:%d, format:%d, channel_layout:0x%x)\n", 
              player.audio_channels, player.audio_samplerate, player.audio_format, player.audio_channel_layout);
     }
 fail:
     return ret;
 }
 
+static int open_subtitle_decoder(AVFormatContext *context, AVStream* st) {
+    int ret = -1;
+
+    AVCodec* pCodec = NULL;
+    pCodec = avcodec_find_decoder(st->codecpar->codec_id);
+    if (NULL != pCodec) {
+        pthread_mutex_init(&(player.sdec_context_lock), NULL);
+        player.scodec_context= avcodec_alloc_context3(pCodec);
+        if (NULL == player.scodec_context) {
+            pthread_mutex_destroy(&(player.sdec_context_lock));
+            av_log(context, AV_LOG_ERROR, "alloc condec context failed\n");
+            ret = -1;
+            goto fail;
+        }
+        avcodec_parameters_to_context(player.scodec_context, st->codecpar);
+    }
+    ret = avcodec_open2(player.scodec_context, NULL, NULL);
+    if (0 == ret) {
+        av_log(player.context, AV_LOG_ERROR, "%s, open decoder [%s] success\n", __func__, pCodec->name);
+    } else {
+        av_log(player.context, AV_LOG_ERROR, "%s, open decoder [%s] failed\n", __func__, pCodec->name);
+    }
+fail:
+    return ret;
+}
 static int video_decoder_threadloop() {
     AVPacket pkt;
     int ret;
@@ -886,6 +962,63 @@ go_on:
     av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
 }
 
+static int get_text_from_ass(const char*ass, char* text) {
+    int pos_last_comma = 0;
+    for (int i = 0; i < strlen(ass); i++) {
+        if (ass[i] == ',') {
+            pos_last_comma = i;
+        }
+    }
+    av_log(NULL, AV_LOG_ERROR, "find last comma pos:%d\n", pos_last_comma);
+    strcpy(text, ass + pos_last_comma + 1);
+
+    return 0;
+}
+static int subtitle_decoder_threadloop() {
+	AVPacket pkt;
+    int ret;
+    AVFrame* subtitle_frame = av_frame_alloc();
+    for (;;) {
+        int *serial = -1;
+        ret = packet_queue_get(&player.sub_pkts_queue, &pkt, &serial);
+        if (-1 == ret) {
+            av_packet_unref(&pkt);
+            break;
+        }
+        pthread_mutex_lock(&(player.sdec_context_lock));
+		AVSubtitle sub_frame;
+        int got_sub = 0;
+        int ret_decoder = avcodec_decode_subtitle2(player.scodec_context, &sub_frame, &got_sub, &pkt);
+        if (ret_decoder >= 0) {
+            if (got_sub) {
+                if (sub_frame.pts == AV_NOPTS_VALUE) {
+                    sub_frame.pts = pkt.pts;
+                }
+                subtitle_frame->pts = sub_frame.pts;
+                AVSubtitleRect* rect = sub_frame.rects[0];
+                //now, we only support ass and txt type
+                if (rect->type == SUBTITLE_ASS) {
+                     char text[2048] = {0};
+                     get_text_from_ass(rect->ass, text);
+                     subtitle_frame->width = 480;
+                     subtitle_frame->height = 320;
+                     unsigned char *out_buffer = (unsigned char *)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_GRAY8, subtitle_frame->width, subtitle_frame->height, 1));
+                     memcpy(out_buffer, text, 2048);
+                     av_image_fill_arrays(subtitle_frame->data, subtitle_frame->linesize, out_buffer,AV_PIX_FMT_GRAY8, subtitle_frame->width, subtitle_frame->height, 1);
+                     av_log(NULL, AV_LOG_ERROR, "%s:ass text:%s\n", __func__, subtitle_frame->data[0]);
+                     frame_queue_put(&player.sub_frames_queue, subtitle_frame, serial);
+                }
+            }
+			avsubtitle_free(&sub_frame);
+        }
+        av_packet_unref(&pkt);
+        av_frame_unref(subtitle_frame);
+        pthread_mutex_unlock(&(player.sdec_context_lock));
+    }
+    av_frame_free(&subtitle_frame);
+    av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
+}
+
 static int get_stream_type(int stream_index) {
     return player.context->streams[stream_index]->codecpar->codec_type;
 }
@@ -933,33 +1066,37 @@ static void get_defalut_tracks(AVFormatContext* context) {
     int i = 0;
     int is_vstream_find = 0;
     int is_astream_find = 0;
-
+    int is_sstream_find = 0;
     player.index_video_stream = AVMEDIA_TYPE_VIDEO;
     player.index_audio_stream = AVMEDIA_TYPE_AUDIO;
+    player.index_subtitle_stream = AVMEDIA_TYPE_SUBTITLE;
     for (int i = 0; i < context->nb_streams; i++) {
         enum AVMediaType stream_type = context->streams[i]->codecpar->codec_type;
         av_log(NULL, AV_LOG_ERROR, "%s: stream:%d type:%d\n", __func__, i, stream_type);
+        context->streams[i]->discard = AVDISCARD_ALL;
         if (stream_type == AVMEDIA_TYPE_VIDEO) {
             if (!is_vstream_find) {
                 is_vstream_find = 1;
                 player.index_video_stream = i;
-            }else {
-                context->streams[i]->discard = AVDISCARD_ALL;
+                context->streams[i]->discard = AVDISCARD_DEFAULT;
             }
         }
         else if (stream_type == AVMEDIA_TYPE_AUDIO) {
             if (!is_astream_find) {
                 is_astream_find = 1;
                 player.index_audio_stream = i;
-            } else {
-                context->streams[i]->discard = AVDISCARD_ALL;
+                context->streams[i]->discard = AVDISCARD_DEFAULT;
             }
-        }else {
-            context->streams[i]->discard = AVDISCARD_ALL;
+        }else if (stream_type == AVMEDIA_TYPE_SUBTITLE){
+            if (!is_sstream_find) {
+                is_sstream_find = 1;
+                player.index_subtitle_stream = i;
+                context->streams[i]->discard = AVDISCARD_DEFAULT;
+            }
         }
     }
-    av_log(NULL, AV_LOG_ERROR, "%s: video_stream:%d, audio_stream:%d\n", __func__,
-             player.index_video_stream, player.index_audio_stream);
+    av_log(NULL, AV_LOG_ERROR, "%s: video_stream:%d, audio_stream:%d, subtitle_stream:%d\n", __func__,
+             player.index_video_stream, player.index_audio_stream, player.index_subtitle_stream);
 }
 
 static int streams_open(const char*name) {
@@ -1000,13 +1137,12 @@ static int streams_open(const char*name) {
     get_defalut_tracks(context);
 
     AVStream* st_video = (context)->streams[player.index_video_stream];
+	
     AVStream* st_audio = (context)->streams[player.index_audio_stream];
-    player.video_width = st_video->codecpar->width;
-    player.video_height = st_video->codecpar->height;
 
-    player.video_surface.width = player.video_width;
-    player.video_surface.height = player.video_height;
-    av_log(NULL, AV_LOG_ERROR, "video width:%d, video height:%d\n", player.video_width, player.video_height);
+	AVStream* st_subtitle = (context)->streams[player.index_subtitle_stream];
+
+
     ret = open_video_decoder(context, st_video);
     if (ret < 0) {
         av_log(context, AV_LOG_ERROR, "%s, open video decoder failed\n", __func__);
@@ -1015,9 +1151,9 @@ static int streams_open(const char*name) {
     }
     packet_queue_init(&player.video_pkts_queue);
     frame_queue_init(&player.video_frames_queue);
-
     player.video_decoder_thread = SDL_CreateThread(video_decoder_threadloop, "video_decoder_threadloop", context);
     player.video_refresh = SDL_CreateThread(video_refresh, "video_refresh", context);
+
 
     ret = open_audio_decoder(context, st_audio);
     if (ret < 0) {
@@ -1027,6 +1163,13 @@ static int streams_open(const char*name) {
     packet_queue_init(&player.audio_pkts_queue);
     frame_queue_init(&player.audio_frames_queue);
     player.audio_decoder_thread = SDL_CreateThread(audio_decoder_threadloop, "audio_decoder_threadloop", context);
+
+    
+    ret = open_subtitle_decoder(context, st_subtitle);
+    packet_queue_init(&player.sub_pkts_queue);
+    frame_queue_init(&player.sub_frames_queue);
+    player.video_decoder_thread = SDL_CreateThread(subtitle_decoder_threadloop, "subtitle_decoder_threadloop", context);
+    player.video_refresh = SDL_CreateThread(subtitle_display, "subtitle_display", context);
 fail:
     pthread_mutex_unlock(&(player.context_lock));
     return ret;
@@ -1109,11 +1252,12 @@ static void main_threadloop(AVFormatContext* context) {
                 player.is_seeking = 1;
                 packet_queue_flush(&player.video_pkts_queue);
                 packet_queue_flush(&player.audio_pkts_queue);
-
+                packet_queue_flush(&player.sub_pkts_queue);
                 flush_decoders();
 
                 frame_queue_flush(&player.video_frames_queue);
                 frame_queue_flush(&player.audio_frames_queue);
+                frame_queue_flush(&player.sub_frames_queue);
                 player.clock.timestamp_audio_real = seek_pos + start_time;
             }
             if (player.flag_select_track) {
@@ -1150,6 +1294,9 @@ static void main_threadloop(AVFormatContext* context) {
             }
             if (pkt.stream_index == player.index_audio_stream) {
                 packet_queue_put(&player.audio_pkts_queue, &pkt);
+            }
+            if (pkt.stream_index == player.index_subtitle_stream) {
+				 packet_queue_put(&player.sub_pkts_queue, &pkt);
             }
     }
     av_log(NULL, AV_LOG_ERROR, "main thread exit success\n");
