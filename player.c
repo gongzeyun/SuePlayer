@@ -91,7 +91,7 @@ typedef struct AVPlayer {
     AVCodecContext* acodec_context;
     pthread_mutex_t adec_context_lock;
     AVCodecContext* scodec_context;
-	pthread_mutex_t sdec_context_lock;
+    pthread_mutex_t sdec_context_lock;
     /* video info */
     int video_width;
     int video_height;
@@ -566,7 +566,7 @@ static int update_video_render(int width, int height, int pixel_format) {
 }
 
 static void update_window_title(const char* title) {
-	SDL_SetWindowTitle(player.video_surface.window, title);
+    SDL_SetWindowTitle(player.video_surface.window, title);
 }
 
 static void subtitle_display() {
@@ -596,6 +596,7 @@ static void subtitle_display() {
                 usleep(sleep_us);
                 av_log(NULL, AV_LOG_ERROR, "%s:text:%s\n", __func__, frame_refesh->data[0]);
                 update_window_title(frame_refesh->data[0]);
+                av_free(frame_refesh->data[0]);
             }
             av_frame_unref(frame_refesh);
         } else {
@@ -970,12 +971,12 @@ static int get_text_from_ass(const char*ass, char* text) {
         }
     }
     av_log(NULL, AV_LOG_ERROR, "find last comma pos:%d\n", pos_last_comma);
-    strcpy(text, ass + pos_last_comma + 1);
+    strncpy(text, ass + pos_last_comma + 1, strlen(ass) - pos_last_comma - 3);
 
     return 0;
 }
 static int subtitle_decoder_threadloop() {
-	AVPacket pkt;
+    AVPacket pkt;
     int ret;
     AVFrame* subtitle_frame = av_frame_alloc();
     for (;;) {
@@ -986,13 +987,14 @@ static int subtitle_decoder_threadloop() {
             break;
         }
         pthread_mutex_lock(&(player.sdec_context_lock));
-		AVSubtitle sub_frame;
+        AVSubtitle sub_frame;
         int got_sub = 0;
         int ret_decoder = avcodec_decode_subtitle2(player.scodec_context, &sub_frame, &got_sub, &pkt);
         if (ret_decoder >= 0) {
             if (got_sub) {
+                //av_log(NULL, AV_LOG_ERROR, "%s:pts:%lld\n", __func__, sub_frame.pts);
                 if (sub_frame.pts == AV_NOPTS_VALUE) {
-                    sub_frame.pts = pkt.pts;
+                    sub_frame.pts = pkt.dts;
                 }
                 subtitle_frame->pts = sub_frame.pts;
                 AVSubtitleRect* rect = sub_frame.rects[0];
@@ -1005,11 +1007,13 @@ static int subtitle_decoder_threadloop() {
                      unsigned char *out_buffer = (unsigned char *)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_GRAY8, subtitle_frame->width, subtitle_frame->height, 1));
                      memcpy(out_buffer, text, 2048);
                      av_image_fill_arrays(subtitle_frame->data, subtitle_frame->linesize, out_buffer,AV_PIX_FMT_GRAY8, subtitle_frame->width, subtitle_frame->height, 1);
-                     av_log(NULL, AV_LOG_ERROR, "%s:ass text:%s\n", __func__, subtitle_frame->data[0]);
+                     //av_log(NULL, AV_LOG_ERROR, "%s:ass text:%s, start_time:%d, end_time:%d, pts:%lld\n", __func__, 
+                     //         subtitle_frame->data[0], sub_frame.start_display_time, sub_frame.end_display_time, sub_frame.pts);
                      frame_queue_put(&player.sub_frames_queue, subtitle_frame, serial);
+                     //av_free(out_buffer);
                 }
+                avsubtitle_free(&sub_frame);
             }
-			avsubtitle_free(&sub_frame);
         }
         av_packet_unref(&pkt);
         av_frame_unref(subtitle_frame);
@@ -1137,10 +1141,10 @@ static int streams_open(const char*name) {
     get_defalut_tracks(context);
 
     AVStream* st_video = (context)->streams[player.index_video_stream];
-	
+
     AVStream* st_audio = (context)->streams[player.index_audio_stream];
 
-	AVStream* st_subtitle = (context)->streams[player.index_subtitle_stream];
+    AVStream* st_subtitle = (context)->streams[player.index_subtitle_stream];
 
 
     ret = open_video_decoder(context, st_video);
@@ -1296,7 +1300,7 @@ static void main_threadloop(AVFormatContext* context) {
                 packet_queue_put(&player.audio_pkts_queue, &pkt);
             }
             if (pkt.stream_index == player.index_subtitle_stream) {
-				 packet_queue_put(&player.sub_pkts_queue, &pkt);
+                packet_queue_put(&player.sub_pkts_queue, &pkt);
             }
     }
     av_log(NULL, AV_LOG_ERROR, "main thread exit success\n");
