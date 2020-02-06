@@ -107,8 +107,10 @@ typedef struct AVPlayer {
 
     SDL_Thread* main_thread;
     SDL_Thread* video_refresh;
+    SDL_Thread* subtitle_refresh;
     SDL_Thread* audio_decoder_thread;
     SDL_Thread* video_decoder_thread;
+    SDL_Thread* subtitle_decoder_thread;
     SDL_Thread* event_thread;
 
     AVFilterContext *src_audio_filter;
@@ -1191,8 +1193,8 @@ static int streams_open(const char*name) {
         }
         packet_queue_init(&player.sub_pkts_queue);
         frame_queue_init(&player.sub_frames_queue);
-        player.video_decoder_thread = SDL_CreateThread(subtitle_decoder_threadloop, "subtitle_decoder_threadloop", context);
-        player.video_refresh = SDL_CreateThread(subtitle_display, "subtitle_display", context);
+        player.subtitle_decoder_thread = SDL_CreateThread(subtitle_decoder_threadloop, "subtitle_decoder_threadloop", context);
+        player.subtitle_refresh = SDL_CreateThread(subtitle_display, "subtitle_display", context);
     }
 fail:
     pthread_mutex_unlock(&(player.context_lock));
@@ -1207,6 +1209,9 @@ static void signal_decoder_thread_exit() {
     /* release video pks queue */
     player.video_pkts_queue.abort = 1;
     av_log(NULL, AV_LOG_ERROR, "set video queue abort flag\n");
+
+    player.sub_pkts_queue.abort = 1;
+    av_log(NULL, AV_LOG_ERROR, "set subtitle queue abort flag\n");
 }
 
 static void signal_render_thread_exit() {
@@ -1217,6 +1222,9 @@ static void signal_render_thread_exit() {
     /* release video frames queue */
     player.video_frames_queue.abort = 1;
     av_log(NULL, AV_LOG_ERROR, "set video frames queue abort flag\n");
+
+    player.sub_frames_queue.abort = 1;
+    av_log(NULL, AV_LOG_ERROR, "set subtitle frames queue abort flag\n");
 }
 
 
@@ -1224,6 +1232,7 @@ static int streams_close() {
     player.flag_exit = 1;
     signal_render_thread_exit();
     SDL_WaitThread(player.video_refresh, NULL);
+    SDL_WaitThread(player.subtitle_refresh, NULL);
     SDL_CloseAudio();
 
     signal_decoder_thread_exit();
@@ -1234,13 +1243,31 @@ static int streams_close() {
     SDL_WaitThread(player.video_decoder_thread, NULL);
     packet_queue_destroy(&player.video_pkts_queue);
 
+    SDL_WaitThread(player.subtitle_decoder_thread, NULL);
+    packet_queue_destroy(&player.sub_pkts_queue);
 
     frame_queue_destroy(&player.audio_frames_queue);
     frame_queue_destroy(&player.video_frames_queue);
+    frame_queue_destroy(&player.sub_frames_queue);
 
     if (player.vcodec_context != NULL) {
         avcodec_close(player.vcodec_context);
         avcodec_free_context(&player.vcodec_context);
+        pthread_mutex_destroy(&player.vdec_context_lock);
+        player.vcodec_context = NULL;
+    }
+
+    if (player.acodec_context != NULL) {
+        avcodec_close(player.acodec_context);
+        avcodec_free_context(&player.acodec_context);
+        pthread_mutex_destroy(&player.adec_context_lock);
+        player.vcodec_context = NULL;
+    }
+
+    if (player.scodec_context != NULL) {
+        avcodec_close(player.scodec_context);
+        avcodec_free_context(&player.scodec_context);
+        pthread_mutex_lock(&player.sdec_context_lock);
         player.vcodec_context = NULL;
     }
     if (player.context != NULL) {
