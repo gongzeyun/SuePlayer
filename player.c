@@ -179,7 +179,7 @@ static const struct TextureFormatEntry {
 #define MAX_PACKETS_NUM    1024U
 static AVPlayer player;
 static SDL_AudioDeviceID audio_render;
-
+#define AUTHORINFO    "Author:GongZeyun"
 static int streams_close();
 
 static int frame_queue_init(SueFrameRingQueue* frame_queue) {
@@ -441,6 +441,9 @@ static release_audio_filter() {
     avfilter_graph_free(&player.audio_graph);
 }
 
+static int64_t get_current_position() {
+    return player.clock.timestamp_audio_real - player.context->start_time;
+}
 
 static int init_audio_filter(int samplerate, int audio_format, int channels, int channel_layout) {
     char args[512] = {0};
@@ -509,7 +512,21 @@ static update_audio_filter(int samplerate, int audio_format, int channels, int c
         player.audio_channel_layout = channel_layout;
     }
 }
-
+static int draw_string(SDL_Renderer* render, char* string, SDL_Color color, SDL_Rect rect) {
+    SDL_Surface *text_surface;
+    if (strlen(string) > 0) {
+        if(!(text_surface=TTF_RenderUTF8_Solid(player.font, string, color))) {
+            av_log(NULL, AV_LOG_ERROR, "%s:Create text surface failed:%s!\n", __func__, TTF_GetError);
+        } else {
+            SDL_Texture*texture = SDL_CreateTextureFromSurface(render,text_surface);
+            if (texture) {
+                SDL_RenderCopyEx(render, texture, NULL, &rect, 0, NULL, SDL_FLIP_NONE);
+                SDL_FreeSurface(text_surface);
+                SDL_DestroyTexture(texture);
+            }
+        }
+    }
+}
 static int render_video_frame(AVFrame* frame) {
     SDL_Event event;
     AVFrame *frame_display = frame; //default is frame
@@ -552,27 +569,31 @@ static int render_video_frame(AVFrame* frame) {
         SDL_RenderClear(player.video_surface.render);
         SDL_RenderCopy(player.video_surface.render, player.video_surface.texture, NULL, &sdlRect);
 
-        /* this part is used for subtitle */
-        SDL_Color color={255,255,255};
-        SDL_Surface *text_surface;
+        /* draw subtitle here */
+        SDL_Color color = {255, 255, 255};
         SDL_Rect sdlrect_sub;
         TTF_SizeUTF8(player.font, player.sub_title_display, &(sdlrect_sub.w), &(sdlrect_sub.h));
         sdlrect_sub.x = (player.video_surface.width - sdlrect_sub.w) * 0.5;
         sdlrect_sub.y = player.video_surface.height - sdlrect_sub.h - 20;
-        if (strlen(player.sub_title_display) > 0) {
-            if(!(text_surface=TTF_RenderUTF8_Solid(player.font,player.sub_title_display,color))) {
-                av_log(NULL, AV_LOG_ERROR, "%s:Create text surface failed:%s!\n", __func__, TTF_GetError);
-            } else {
-                //av_log(NULL,AV_LOG_ERROR, "%s:Create text surface success, subtitle:%s\n", __func__, player.sub_title_display);
-                SDL_Texture*texture = SDL_CreateTextureFromSurface(player.video_surface.render,text_surface);
-                if (texture) {
-                    //av_log(NULL,AV_LOG_ERROR, "Create texture success\n");
-                    SDL_RenderCopyEx(player.video_surface.render, texture, NULL, &sdlrect_sub, 0, NULL, SDL_FLIP_NONE);
-                    SDL_FreeSurface(text_surface);
-                    SDL_DestroyTexture(texture);
-                }
-            }
-        }
+        draw_string(player.video_surface.render, player.sub_title_display, color, sdlrect_sub);
+
+        /*draw autho info */
+        SDL_Rect sdlrect_author;
+        TTF_SizeUTF8(player.font, AUTHORINFO, &(sdlrect_author.w), &(sdlrect_author.h));
+        sdlrect_author.x = 20;
+        sdlrect_author.y = 20;
+        draw_string(player.video_surface.render, AUTHORINFO, color, sdlrect_author);
+
+        /* draw time info */
+        SDL_Rect sdlrect_time;
+        char time_info[16] = {0};
+        sprintf(time_info, "%d:%d", (get_current_position() + 500000) / 1000000,(player.context->duration + 500000) / 1000000);
+        TTF_SizeUTF8(player.font, time_info, &(sdlrect_time.w), &(sdlrect_time.h));
+        sdlrect_time.x = player.video_surface.width - sdlrect_time.w - 10;
+        sdlrect_time.y = 20;
+        draw_string(player.video_surface.render, time_info, color, sdlrect_time);
+
+
         SDL_RenderPresent(player.video_surface.render);
     }
 }
@@ -690,10 +711,6 @@ static void update_audio_clock(int64_t pts) {
     player.clock.timestamp_audio_real= timestamp_real - 150000;
 }
 
-static int64_t get_current_position() {
-    return player.clock.timestamp_audio_real - player.context->start_time;
-}
-
 static void avcodec_to_string(char *buf, int buf_size, AVCodecContext *enc, int encode)
 {
     const char *codec_type;
@@ -746,18 +763,10 @@ static void show_tracks_info() {
     }
     SDL_SetWindowTitle(player.video_surface.window, tracks_info);
 }
-static void update_play_info() {
-    char title[256] = {0};
-    sprintf(title, "%s, play(%d:%d)", player.context->filename, 
-                (get_current_position() + 500000) / 1000000,
-                (player.context->duration + 500000) / 1000000);
-    SDL_SetWindowTitle(player.video_surface.window, title);
-}
 
 static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
     int data_length = 0;
     int length_read = 0;
-    //update_play_info();
     int serial = 0;
     if (player.aframe_playing) {
         SDL_memset(buffer, 0, len);
@@ -1404,8 +1413,7 @@ static void process_key_event(const SDL_Event * event) {
     int index_stream_selected = 0;
     switch (event->key.keysym.sym) {
         case SDLK_t:
-            SDL_Log("key T is down\n");
-            update_play_info();
+            SDL_Log("key T is down\n");;
             break;
         case SDLK_s:
             SDL_Log("key S is down\n");
