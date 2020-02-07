@@ -5,6 +5,7 @@
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 #include <SDL2/SDL.h>
+#include "SDL2/SDL_ttf.h"
 
 
 //compile cmd: sudo gcc player.c -lavutil -lavformat -lavcodec -lz -lavutil -lpthread -lm -lswscale -lavfilter -lswresample -lSDL2
@@ -143,6 +144,10 @@ typedef struct AVPlayer {
 
     int is_full_screen;
     int paused;
+
+    TTF_Font *font;
+    char sub_title_display[2048];
+    char sub_title_display_duration;
 }AVPlayer;
 
 static const struct TextureFormatEntry {
@@ -546,6 +551,25 @@ static int render_video_frame(AVFrame* frame) {
         sdlRect.h = player.video_surface.height;
         SDL_RenderClear(player.video_surface.render);
         SDL_RenderCopy(player.video_surface.render, player.video_surface.texture, NULL, &sdlRect);
+
+        /* this part is used for subtitle */
+        SDL_Color color={255,255,255};
+        SDL_Surface *text_surface;
+        SDL_Rect sdlrect_sub;
+        TTF_SizeUTF8(player.font, player.sub_title_display, &(sdlrect_sub.w), &(sdlrect_sub.h));
+        sdlrect_sub.x = (player.video_surface.width - sdlrect_sub.w) * 0.5;
+        sdlrect_sub.y = player.video_surface.height - sdlrect_sub.h - 20;
+        if(!(text_surface=TTF_RenderUTF8_Solid(player.font,player.sub_title_display,color))) {
+            av_log(NULL, AV_LOG_ERROR, "Create text surface failed:%s!\n", TTF_GetError);
+        } else {
+            av_log(NULL,AV_LOG_ERROR, "Create text surface success, subtitle:%s\n", player.sub_title_display);
+            SDL_Texture*texture = SDL_CreateTextureFromSurface(player.video_surface.render,text_surface);
+            if (texture) {
+                av_log(NULL,AV_LOG_ERROR, "Create texture success\n");
+                SDL_RenderCopyEx(player.video_surface.render, texture, NULL, &sdlrect_sub, 0, NULL, SDL_FLIP_NONE);
+                SDL_DestroyTexture(texture);
+            }
+        }
         SDL_RenderPresent(player.video_surface.render);
     }
 }
@@ -600,9 +624,11 @@ static void subtitle_display() {
                 int64_t time_display_duration = av_rescale_q(frame_refesh->pkt_duration,
                                                         player.context->streams[player.index_subtitle_stream]->time_base,AV_TIME_BASE_Q);
                 //av_log(NULL, AV_LOG_ERROR, "%s:subtitle display duration:%lld\n", __func__, time_display_duration);
-                update_window_title(frame_refesh->data[0]);
+                //update_window_title(frame_refesh->data[0]);
+                memcpy(player.sub_title_display, frame_refesh->data[0], 2048);
                 usleep(time_display_duration + 500000); //500ms is a experienced value
-                update_window_title("");
+                //update_window_title("");
+				strcpy(player.sub_title_display, "");
                 av_free(frame_refesh->data[0]);
             }
             av_frame_unref(frame_refesh);
@@ -792,7 +818,20 @@ static int create_audio_render(int channels, int samplerate, int format) {
     return 0;
 }
 
-
+static int create_subtitle_render() {
+	if(!TTF_WasInit() && TTF_Init()==-1) {
+        av_log(NULL, AV_LOG_ERROR, "TTF_Init: %s\n", TTF_GetError());
+        return -1;;
+    }
+    // load font.ttf at size 16 into font
+    player.font=TTF_OpenFont("simsun.ttc", 20);
+    if(!player.font) {
+        av_log(NULL, AV_LOG_ERROR, "TTF_OpenFont: %s\n", TTF_GetError());
+        return -1;
+    } else {
+        av_log(NULL, AV_LOG_ERROR, "TTF_OpenFont success\n");
+    }
+}
 static int open_video_decoder(AVFormatContext* context, AVStream *st) {
 
     int ret = -1;
@@ -1548,10 +1587,14 @@ int main(int argc, char* argv[])
         av_log(NULL, AV_LOG_ERROR, "open %s failed, goto fail\n", file_name);
         return ret;
     }
+    if (player.index_video_stream >= 0)
+        create_video_render(player.video_width, player.video_height, SDL_PIXELFORMAT_IYUV);
 
-    create_video_render(player.video_width, player.video_height, SDL_PIXELFORMAT_IYUV);
+    if (player.index_audio_stream>= 0)
+        create_audio_render(player.audio_channels, player.audio_samplerate, player.audio_format);
 
-    create_audio_render(player.audio_channels, player.audio_samplerate, player.audio_format);
+    if (player.index_subtitle_stream >= 0)
+        create_subtitle_render();
 
     player.event_thread = SDL_CreateThread(eventloop, "event_loop", NULL);
     //create main thread
