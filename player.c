@@ -560,9 +560,9 @@ static int render_video_frame(AVFrame* frame) {
         sdlrect_sub.x = (player.video_surface.width - sdlrect_sub.w) * 0.5;
         sdlrect_sub.y = player.video_surface.height - sdlrect_sub.h - 20;
         if(!(text_surface=TTF_RenderUTF8_Solid(player.font,player.sub_title_display,color))) {
-            av_log(NULL, AV_LOG_ERROR, "Create text surface failed:%s!\n", TTF_GetError);
+            av_log(NULL, AV_LOG_ERROR, "%s:Create text surface failed:%s!\n", __func__, TTF_GetError);
         } else {
-            av_log(NULL,AV_LOG_ERROR, "Create text surface success, subtitle:%s\n", player.sub_title_display);
+            av_log(NULL,AV_LOG_ERROR, "%s:Create text surface success, subtitle:%s\n", __func__, player.sub_title_display);
             SDL_Texture*texture = SDL_CreateTextureFromSurface(player.video_surface.render,text_surface);
             if (texture) {
                 av_log(NULL,AV_LOG_ERROR, "Create texture success\n");
@@ -618,19 +618,15 @@ static void subtitle_display() {
                 av_frame_unref(frame_refesh);
                 continue;
             }
-            if (av_diff > -50000 && !player.is_seeking) {
-                int64_t sleep_us = av_diff > 0 ? av_diff : 0;
-                usleep(sleep_us);
-                int64_t time_display_duration = av_rescale_q(frame_refesh->pkt_duration,
-                                                        player.context->streams[player.index_subtitle_stream]->time_base,AV_TIME_BASE_Q);
-                //av_log(NULL, AV_LOG_ERROR, "%s:subtitle display duration:%lld\n", __func__, time_display_duration);
-                //update_window_title(frame_refesh->data[0]);
-                memcpy(player.sub_title_display, frame_refesh->data[0], 2048);
-                usleep(time_display_duration + 500000); //500ms is a experienced value
-                //update_window_title("");
-				strcpy(player.sub_title_display, "");
-                av_free(frame_refesh->data[0]);
-            }
+            int64_t sleep_us = av_diff > 0 ? av_diff : 0;
+            usleep(sleep_us);
+            int64_t time_display_duration = av_rescale_q(frame_refesh->pkt_duration,
+                                                    player.context->streams[player.index_subtitle_stream]->time_base,AV_TIME_BASE_Q);
+            av_log(NULL, AV_LOG_ERROR, "%s:%s\n", __func__, frame_refesh->data[0]);
+            memcpy(player.sub_title_display, frame_refesh->data[0], 2048);
+            usleep(time_display_duration);
+			memset(player.sub_title_display, 0x00, 2048);
+            av_free(frame_refesh->data[0]);
             av_frame_unref(frame_refesh);
         } else {
             break;
@@ -638,7 +634,7 @@ static void subtitle_display() {
     }
     TTF_CloseFont(player.font);
     if (TTF_WasInit) {
-        	TTF_Quit();    
+        TTF_Quit();
     }
     av_frame_free(&frame_refesh);
     av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
@@ -668,7 +664,7 @@ static void video_refresh() {
                 av_frame_unref(frame_refesh);
                 continue;
             }
-            if (av_diff > -50000 && !player.is_seeking) {
+            if (1/*av_diff > -50000 && !player.is_seeking*/) {
                 int64_t sleep_us = av_diff > 0 ? av_diff : 0;
                 usleep(sleep_us);
                 update_video_render(frame_refesh->width, frame_refesh->height, SDL_PIXELFORMAT_IYUV);
@@ -827,7 +823,7 @@ static int create_subtitle_render() {
         return -1;;
     }
     // load font.ttf at size 16 into font
-    player.font=TTF_OpenFont("simsun.ttc", 20);
+    player.font=TTF_OpenFont("simsun.ttc", 40);
     if(!player.font) {
         av_log(NULL, AV_LOG_ERROR, "TTF_OpenFont: %s\n", TTF_GetError());
         return -1;
@@ -1062,8 +1058,8 @@ static int subtitle_decoder_threadloop() {
                      unsigned char *out_buffer = (unsigned char *)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_GRAY8, subtitle_frame->width, subtitle_frame->height, 1));
                      memcpy(out_buffer, text, 2048);
                      av_image_fill_arrays(subtitle_frame->data, subtitle_frame->linesize, out_buffer,AV_PIX_FMT_GRAY8, subtitle_frame->width, subtitle_frame->height, 1);
-                     //av_log(NULL, AV_LOG_ERROR, "%s:text:%s, start_time:%d, end_time:%d, pts:%lld, duration:%d\n", __func__, 
-                     //         subtitle_frame->data[0], sub_frame.start_display_time, sub_frame.end_display_time, sub_frame.pts, subtitle_frame->pkt_duration);
+                     av_log(NULL, AV_LOG_ERROR, "%s:text:%s, start_time:%d, end_time:%d, pts:%lld, duration:%d\n", __func__, 
+                              subtitle_frame->data[0], sub_frame.start_display_time, sub_frame.end_display_time, sub_frame.pts, subtitle_frame->pkt_duration);
                      frame_queue_put(&player.sub_frames_queue, subtitle_frame, serial);
                      //av_free(out_buffer);
                 }
