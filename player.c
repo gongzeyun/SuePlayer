@@ -636,7 +636,10 @@ static void subtitle_display() {
             break;
         }
     }
-
+    TTF_CloseFont(player.font);
+    if (TTF_WasInit) {
+        	TTF_Quit();    
+    }
     av_frame_free(&frame_refesh);
     av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
 }
@@ -676,7 +679,7 @@ static void video_refresh() {
             break;
         }
     }
-
+    SDL_DestroyTexture(player.video_surface.texture);
     av_frame_free(&frame_refesh);
     av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
 }
@@ -1273,7 +1276,7 @@ static int streams_close() {
     SDL_WaitThread(player.video_refresh, NULL);
     SDL_WaitThread(player.subtitle_refresh, NULL);
     SDL_CloseAudio();
-
+    
     signal_decoder_thread_exit();
     SDL_WaitThread(player.audio_decoder_thread, NULL);
     release_audio_filter();
@@ -1306,7 +1309,7 @@ static int streams_close() {
     if (player.scodec_context != NULL) {
         avcodec_close(player.scodec_context);
         avcodec_free_context(&player.scodec_context);
-        pthread_mutex_lock(&player.sdec_context_lock);
+        pthread_mutex_destroy(&player.sdec_context_lock);
         player.vcodec_context = NULL;
     }
     if (player.context != NULL) {
