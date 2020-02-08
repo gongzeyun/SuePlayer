@@ -683,23 +683,24 @@ static void subtitle_display() {
                 ts_stream = frame_refesh->pkt_dts;
             int64_t timestamp_subtitle_real = av_rescale_q(ts_stream,
                                                         player.context->streams[player.index_subtitle_stream]->time_base,AV_TIME_BASE_Q);
-            int64_t av_diff = timestamp_subtitle_real - player.clock.timestamp_audio_real;
-            //av_log(NULL, AV_LOG_ERROR,"av diff:%lldms, sub_real:%lld, audio_real:%lld, start_time:%lld\n", av_diff / 1000, 
-            //              timestamp_subtitle_real, player.clock.timestamp_audio_real, player.context->streams[player.index_subtitle_stream]->start_time);
-            if (serial != player.sub_pkts_queue.serial) {
-                av_log(NULL, AV_LOG_ERROR, "%s:serial is different(frame_serial:%d, queue_serial:%d), drop!\n", __func__, serial, player.sub_pkts_queue.serial);
-                av_frame_unref(frame_refesh);
-                continue;
-            }
-            int64_t sleep_us = av_diff > 0 ? av_diff : 0;
-            usleep(sleep_us);
             int64_t time_display_duration = av_rescale_q(frame_refesh->pkt_duration,
                                                     player.context->streams[player.index_subtitle_stream]->time_base,AV_TIME_BASE_Q);
-            //av_log(NULL, AV_LOG_ERROR, "%s:%s\n", __func__, frame_refesh->data[0]);
+            int64_t av_diff = timestamp_subtitle_real - player.clock.timestamp_audio_real;
+
+            int64_t sleep_us = av_diff > 0 ? av_diff : 0;
+			av_log(NULL, AV_LOG_ERROR, "%s:%s, av_diff:%lld\n", __func__, frame_refesh->data[0], av_diff);
+            while (sleep_us >= 0) {//when sleeping here, seek may occured
+                if (serial != player.sub_pkts_queue.serial) {
+                    av_log(NULL, AV_LOG_ERROR, "%s:serial is different(frame_serial:%d, queue_serial:%d), drop!\n", __func__, serial, player.sub_pkts_queue.serial);
+                    goto drop;
+                }
+                usleep(10 * 1000);
+                sleep_us -= 10 * 1000;
+            }
             memcpy(player.sub_title_display, frame_refesh->data[0], 2048);
             usleep(time_display_duration);
             memset(player.sub_title_display, 0x00, 2048);
-            //av_log(NULL, AV_LOG_ERROR, "%s: free addr 0x%x\n", __func__, frame_refesh->data[0]);
+ drop:
             av_free(frame_refesh->data[0]);
             av_frame_unref(frame_refesh);
         } else {
