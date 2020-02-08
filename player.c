@@ -840,7 +840,7 @@ static int create_audio_render(int channels, int samplerate, int format) {
     return 0;
 }
 
-static int create_subtitle_render() {
+static int create_draw_string_font() {
 	if(!TTF_WasInit() && TTF_Init()==-1) {
         av_log(NULL, AV_LOG_ERROR, "TTF_Init: %s\n", TTF_GetError());
         return -1;;
@@ -1618,8 +1618,7 @@ int main(int argc, char* argv[])
     if (player.index_audio_stream>= 0)
         create_audio_render(player.audio_channels, player.audio_samplerate, player.audio_format);
 
-    if (player.index_subtitle_stream >= 0)
-        create_subtitle_render();
+    create_draw_string_font();
 
     player.event_thread = SDL_CreateThread(eventloop, "event_loop", NULL);
     //create main thread
