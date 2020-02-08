@@ -447,6 +447,14 @@ static int64_t get_current_position() {
     return player.clock.timestamp_audio_real - player.context->start_time;
 }
 
+static void format_seconds_to_clock(int64_t seconds, char* clock) {
+    int hours =  seconds / 3600;
+    int minutes = seconds % 3600 / 60;
+	int second  = seconds % 60;
+
+    sprintf(clock, "%02d:%02d:%02d", hours, minutes, second);
+}
+
 static release_audio_filter() {
     avfilter_graph_free(&player.audio_graph);
 }
@@ -593,12 +601,16 @@ static int render_video_frame(AVFrame* frame) {
 
         /* draw time info */
         SDL_Rect sdlrect_time;
-        char time_info[16] = {0};
-        sprintf(time_info, "%d:%d", (get_current_position() + 500000) / 1000000,(player.context->duration + 500000) / 1000000);
-        TTF_SizeUTF8(player.font, time_info, &(sdlrect_time.w), &(sdlrect_time.h));
+        char clock_info[64] = {0};
+        char duration_clock_info[16] = {0};
+        char played_clock_info[16] = {0};
+        format_seconds_to_clock((player.context->duration + 500000) / 1000000, duration_clock_info);
+        format_seconds_to_clock((get_current_position() + 500000) / 1000000, played_clock_info);
+        sprintf(clock_info, "%s/%s", played_clock_info, duration_clock_info);
+        TTF_SizeUTF8(player.font, clock_info, &(sdlrect_time.w), &(sdlrect_time.h));
         sdlrect_time.x = player.video_surface.width - sdlrect_time.w - 10;
         sdlrect_time.y = 20;
-        draw_string(player.video_surface.render, time_info, color, sdlrect_time);
+        draw_string(player.video_surface.render, clock_info, color, sdlrect_time);
 
 
         SDL_RenderPresent(player.video_surface.render);
