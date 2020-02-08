@@ -573,7 +573,7 @@ static void draw_time_info() {
     format_seconds_to_clock((get_current_position() + 500000) / 1000000, played_clock_info);
     sprintf(clock_info, "%s/%s", played_clock_info, duration_clock_info);
     TTF_SizeUTF8(player.font, clock_info, &(sdlrect_time.w), &(sdlrect_time.h));
-    sdlrect_time.x = player.video_surface.width - sdlrect_time.w - 10;
+    sdlrect_time.x = 20;
     sdlrect_time.y = 20;
     draw_string(player.video_surface.render, clock_info, color, sdlrect_time);
 }
@@ -621,7 +621,6 @@ static int render_video_frame(AVFrame* frame) {
         SDL_RenderCopy(player.video_surface.render, player.video_surface.texture, NULL, &sdlRect);
 
         draw_subtitle();
-		draw_author_info();
         draw_time_info();
 
         SDL_RenderPresent(player.video_surface.render);
@@ -678,7 +677,6 @@ static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
             if (player.index_video_stream < 0 ){
                SDL_RenderClear(player.video_surface.render);
                draw_subtitle();
-               draw_author_info();
                draw_time_info();
                SDL_RenderPresent(player.video_surface.render);
             }
@@ -1638,8 +1636,8 @@ int main(int argc, char* argv[])
         av_log(NULL, AV_LOG_ERROR, "open %s failed, goto fail\n", file_name);
         return ret;
     }
-    int window_width = player.video_width > 0 ? player.video_width : 800;
-    int window_height = player.video_height > 0 ? player.video_height:523;
+    int window_width = player.video_width > 0 ? player.video_width : 1280;
+    int window_height = player.video_height > 0 ? player.video_height:720;
     create_graphic_render(window_width, window_height, SDL_PIXELFORMAT_IYUV);//render video¡¢subtitle¡¢author¡¢playtimeinfo
 
     if (player.index_audio_stream>= 0) {
