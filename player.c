@@ -1074,6 +1074,7 @@ static int subtitle_decoder_threadloop() {
                 subtitle_frame->pts = sub_frame.pts;
                 AVSubtitleRect* rect = sub_frame.rects[0];
                 //now, we only support ass and txt type
+                //av_log(NULL, AV_LOG_ERROR, "%s, subtitle type:%d\n", __func__, rect->type);
                 if (rect->type == SUBTITLE_ASS) {
                      char text[2048] = {0};
                      get_text_from_ass(rect->ass, text);
@@ -1088,6 +1089,13 @@ static int subtitle_decoder_threadloop() {
                      //         subtitle_frame->data[0], sub_frame.start_display_time, sub_frame.end_display_time, sub_frame.pts, subtitle_frame->pkt_duration);
                      frame_queue_put(&player.sub_frames_queue, subtitle_frame, serial);
                      //av_free(out_buffer);
+                } else {
+                    av_log(NULL, AV_LOG_ERROR, "%s, subtitle type %d is not supported\n", __func__, rect->type);
+                    avsubtitle_free(&sub_frame);
+                    av_packet_unref(&pkt);
+                    av_frame_unref(subtitle_frame);
+                    pthread_mutex_unlock(&(player.sdec_context_lock));
+                    break;
                 }
                 avsubtitle_free(&sub_frame);
             }
