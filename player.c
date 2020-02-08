@@ -1105,6 +1105,7 @@ static int get_stream_type(int stream_index) {
 }
 
 static int reset_video_decoder(AVStream* st) {
+    av_log(NULL, AV_LOG_ERROR, "%s: stream index:%d\n", __func__, st->index);
     pthread_mutex_lock(&(player.vdec_context_lock));
     avcodec_close(player.vcodec_context);
     avcodec_free_context(&player.vcodec_context);
@@ -1114,6 +1115,7 @@ static int reset_video_decoder(AVStream* st) {
 }
 
 static int reset_audio_decoder(AVStream* st) {
+    av_log(NULL, AV_LOG_ERROR, "%s: stream index:%d\n", __func__, st->index);
     pthread_mutex_lock(&(player.adec_context_lock));
     avcodec_close(player.acodec_context);
     avcodec_free_context(&player.acodec_context);
@@ -1377,21 +1379,19 @@ static void main_threadloop(AVFormatContext* context) {
                 player.clock.timestamp_audio_real = seek_pos + start_time;
             }
             if (player.flag_select_track) {
-                if (pkt.stream_index == player.index_dst_track) {
-                    AVStream *st_dst = player.context->streams[player.index_dst_track];
-                    if (get_stream_type(player.index_dst_track) == AVMEDIA_TYPE_VIDEO) {
-                        AVStream *st_src = player.context->streams[player.index_video_stream];
-                        player.index_video_stream = player.index_dst_track;
-                        reset_video_decoder(st_dst);
-                        st_src->discard = AVDISCARD_ALL;
-                    } else if (get_stream_type(player.index_dst_track) == AVMEDIA_TYPE_AUDIO) {
-                        AVStream *st_src = player.context->streams[player.index_audio_stream];
-                        player.index_audio_stream = player.index_dst_track;
-                        reset_audio_decoder(st_dst);
-                        st_src->discard = AVDISCARD_ALL;
-                    }
-                    player.flag_select_track = 0;
+                AVStream *st_dst = player.context->streams[player.index_dst_track];
+                if (get_stream_type(player.index_dst_track) == AVMEDIA_TYPE_VIDEO) {
+                    AVStream *st_src = player.context->streams[player.index_video_stream];
+                    player.index_video_stream = player.index_dst_track;
+                    reset_video_decoder(st_dst);
+                    st_src->discard = AVDISCARD_ALL;
+                } else if (get_stream_type(player.index_dst_track) == AVMEDIA_TYPE_AUDIO) {
+                    AVStream *st_src = player.context->streams[player.index_audio_stream];
+                    player.index_audio_stream = player.index_dst_track;
+                    reset_audio_decoder(st_dst);
+                    st_src->discard = AVDISCARD_ALL;
                 }
+                player.flag_select_track = 0;
             }
             pthread_mutex_lock(&(player.context_lock));
             if (player.context) {
