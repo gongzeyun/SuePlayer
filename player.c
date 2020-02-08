@@ -437,12 +437,18 @@ int dump_audio(Uint8* data, int length)
     fclose(pFile);
 }
 
-static release_audio_filter() {
-    avfilter_graph_free(&player.audio_graph);
+static void update_audio_clock(int64_t pts) {
+    player.clock.timestamp_audio_stream = pts;
+    int64_t timestamp_real = av_rescale_q(pts, player.context->streams[player.index_audio_stream]->time_base, AV_TIME_BASE_Q);
+    player.clock.timestamp_audio_real= timestamp_real - 150000;
 }
 
 static int64_t get_current_position() {
     return player.clock.timestamp_audio_real - player.context->start_time;
+}
+
+static release_audio_filter() {
+    avfilter_graph_free(&player.audio_graph);
 }
 
 static int init_audio_filter(int samplerate, int audio_format, int channels, int channel_layout) {
@@ -499,7 +505,7 @@ end:
         avfilter_graph_free(&player.audio_graph);
     return ret;
 }
-static update_audio_filter(int samplerate, int audio_format, int channels, int channel_layout) {
+static reconfig_audio_filter(int samplerate, int audio_format, int channels, int channel_layout) {
     if (samplerate != player.audio_samplerate || audio_format != player.audio_format ||
         channels != player.audio_channels || channel_layout != player.audio_channel_layout) {
         av_log(NULL, AV_LOG_ERROR, "reconfig audio filter\n");
@@ -512,6 +518,7 @@ static update_audio_filter(int samplerate, int audio_format, int channels, int c
         player.audio_channel_layout = channel_layout;
     }
 }
+
 static int draw_string(SDL_Renderer* render, char* string, SDL_Color color, SDL_Rect rect) {
     SDL_Surface *text_surface;
     if (strlen(string) > 0) {
@@ -597,7 +604,7 @@ static int render_video_frame(AVFrame* frame) {
         SDL_RenderPresent(player.video_surface.render);
     }
 }
-static int update_video_render(int width, int height, int pixel_format) {
+static int reconfig_video_render(int width, int height, int pixel_format) {
     int access, w, h, format;
     SDL_Texture *texture = player.video_surface.texture;
     if (SDL_QueryTexture(texture, &format, &access, &w, &h) < 0 || width != w || height != h || pixel_format != format) {
@@ -615,8 +622,38 @@ static int update_video_render(int width, int height, int pixel_format) {
     av_log(NULL, AV_LOG_VERBOSE, "Created %dx%d texture with %s.\n", width, height, SDL_GetPixelFormatName(pixel_format));
 }
 
-static void update_window_title(const char* title) {
-    SDL_SetWindowTitle(player.video_surface.window, title);
+static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
+    int data_length = 0;
+    int length_read = 0;
+    int serial = 0;
+    if (player.aframe_playing) {
+        SDL_memset(buffer, 0, len);
+        while (len > 0) {
+            int ret;
+            if (player.pos_abuffer_read >= player.pos_abuffer_tail) {
+                ret = frame_queue_get(&player.audio_frames_queue, player.aframe_playing, &serial);
+                if (serial != player.audio_pkts_queue.serial) {
+                    av_log(NULL, AV_LOG_ERROR, "%s: serial is different(frame_serial:%d, queue_serial:%d), drop!\n", __func__, serial, player.audio_pkts_queue.serial);
+                }
+                if (ret == 0 && serial == player.audio_pkts_queue.serial) {
+                    player.pos_abuffer_read = 0;
+                    player.pos_abuffer_tail = 2 * player.aframe_playing->nb_samples * av_get_channel_layout_nb_channels(player.aframe_playing->channel_layout);
+                } else {
+                    player.is_aplay_end = 1;
+                    SDL_memset(buffer, 0, len);
+                    return;
+                }
+            }
+            data_length = player.pos_abuffer_tail - player.pos_abuffer_read;
+            length_read = data_length > len ? len : data_length;
+            SDL_MixAudio(buffer, player.aframe_playing->data[0] + player.pos_abuffer_read, length_read, SDL_MIX_MAXVOLUME);
+            buffer += length_read;
+            player.pos_abuffer_read += length_read;
+            len -= length_read;
+            //av_log(NULL, AV_LOG_ERROR, "%s, pts:%lld, is_seeking:%d\n", __func__, player.aframe_playing->pkt_pts, player.is_seeking);
+            update_audio_clock(player.aframe_playing->pkt_pts);
+        }
+    }
 }
 
 static void subtitle_display() {
@@ -692,7 +729,7 @@ static void video_refresh() {
             if (1/*av_diff > -50000 && !player.is_seeking*/) {
                 int64_t sleep_us = av_diff > 0 ? av_diff : 0;
                 usleep(sleep_us);
-                update_video_render(frame_refesh->width, frame_refesh->height, SDL_PIXELFORMAT_IYUV);
+                reconfig_video_render(frame_refesh->width, frame_refesh->height, SDL_PIXELFORMAT_IYUV);
                 render_video_frame(frame_refesh);
             }
             av_frame_unref(frame_refesh);
@@ -703,12 +740,6 @@ static void video_refresh() {
     SDL_DestroyTexture(player.video_surface.texture);
     av_frame_free(&frame_refesh);
     av_log(NULL, AV_LOG_ERROR, "%s exit\n", __func__);
-}
-
-static void update_audio_clock(int64_t pts) {
-    player.clock.timestamp_audio_stream = pts;
-    int64_t timestamp_real = av_rescale_q(pts, player.context->streams[player.index_audio_stream]->time_base, AV_TIME_BASE_Q);
-    player.clock.timestamp_audio_real= timestamp_real - 150000;
 }
 
 static void avcodec_to_string(char *buf, int buf_size, AVCodecContext *enc, int encode)
@@ -762,40 +793,6 @@ static void show_tracks_info() {
         avcodec_free_context(&avctx);
     }
     SDL_SetWindowTitle(player.video_surface.window, tracks_info);
-}
-
-static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
-    int data_length = 0;
-    int length_read = 0;
-    int serial = 0;
-    if (player.aframe_playing) {
-        SDL_memset(buffer, 0, len);
-        while (len > 0) {
-            int ret;
-            if (player.pos_abuffer_read >= player.pos_abuffer_tail) {
-                ret = frame_queue_get(&player.audio_frames_queue, player.aframe_playing, &serial);
-                if (serial != player.audio_pkts_queue.serial) {
-                    av_log(NULL, AV_LOG_ERROR, "%s: serial is different(frame_serial:%d, queue_serial:%d), drop!\n", __func__, serial, player.audio_pkts_queue.serial);
-                }
-                if (ret == 0 && serial == player.audio_pkts_queue.serial) {
-                    player.pos_abuffer_read = 0;
-                    player.pos_abuffer_tail = 2 * player.aframe_playing->nb_samples * av_get_channel_layout_nb_channels(player.aframe_playing->channel_layout);
-                } else {
-                    player.is_aplay_end = 1;
-                    SDL_memset(buffer, 0, len);
-                    return;
-                }
-            }
-            data_length = player.pos_abuffer_tail - player.pos_abuffer_read;
-            length_read = data_length > len ? len : data_length;
-            SDL_MixAudio(buffer, player.aframe_playing->data[0] + player.pos_abuffer_read, length_read, SDL_MIX_MAXVOLUME);
-            buffer += length_read;
-            player.pos_abuffer_read += length_read;
-            len -= length_read;
-            //av_log(NULL, AV_LOG_ERROR, "%s, pts:%lld, is_seeking:%d\n", __func__, player.aframe_playing->pkt_pts, player.is_seeking);
-            update_audio_clock(player.aframe_playing->pkt_pts);
-        }
-    }
 }
 
 
@@ -931,6 +928,8 @@ static int open_subtitle_decoder(AVFormatContext *context, AVStream* st) {
 fail:
     return ret;
 }
+
+
 static int video_decoder_threadloop() {
     AVPacket pkt;
     int ret;
@@ -986,7 +985,7 @@ static int audio_decoder_threadloop() {
         avcodec_send_packet(player.acodec_context, &pkt);
         int ret_decoder = avcodec_receive_frame(player.acodec_context, audio_frame);
         if (ret_decoder >= 0 ) {
-            update_audio_filter(audio_frame->sample_rate, audio_frame->format, audio_frame->channels, audio_frame->channel_layout);
+            reconfig_audio_filter(audio_frame->sample_rate, audio_frame->format, audio_frame->channels, audio_frame->channel_layout);
             if ((ret = av_buffersrc_add_frame_flags(player.src_audio_filter, audio_frame, AV_BUFFERSRC_FLAG_KEEP_REF)) < 0) {
                 av_log(NULL, AV_LOG_ERROR, "send frame to src audio filter failed\n");
                 goto go_on;
@@ -1109,6 +1108,7 @@ static int reset_audio_decoder(AVStream* st) {
     player.acodec_context = NULL;
     open_audio_decoder(player.context, st);
 }
+
 static int select_tracks(int stream_selected) {
     int index_stream_selected = stream_selected;
     if (index_stream_selected < 0 || index_stream_selected > player.context->nb_streams - 1) {
