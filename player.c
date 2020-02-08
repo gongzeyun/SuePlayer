@@ -542,6 +542,42 @@ static int draw_string(SDL_Renderer* render, char* string, SDL_Color color, SDL_
         }
     }
 }
+
+static void draw_subtitle() {
+    SDL_Color color = {255, 255, 255};
+    SDL_Rect sdlrect_sub;
+    TTF_SizeUTF8(player.font, player.sub_title_display, &(sdlrect_sub.w), &(sdlrect_sub.h));
+    sdlrect_sub.x = (player.video_surface.width - sdlrect_sub.w) * 0.5;
+    sdlrect_sub.y = player.video_surface.height - sdlrect_sub.h - 20;
+    draw_string(player.video_surface.render, player.sub_title_display, color, sdlrect_sub);
+}
+
+static void draw_author_info() {
+    /*draw autho info */
+    SDL_Color color = {255, 255, 255};
+    SDL_Rect sdlrect_author;
+    TTF_SizeUTF8(player.font, AUTHORINFO, &(sdlrect_author.w), &(sdlrect_author.h));
+    sdlrect_author.x = 20;
+    sdlrect_author.y = 20;
+    draw_string(player.video_surface.render, AUTHORINFO, color, sdlrect_author);
+}
+
+static void draw_time_info() {
+    /* draw time info */
+    SDL_Color color = {255, 255, 255};
+    SDL_Rect sdlrect_time;
+    char clock_info[64] = {0};
+    char duration_clock_info[16] = {0};
+    char played_clock_info[16] = {0};
+    format_seconds_to_clock((player.context->duration + 500000) / 1000000, duration_clock_info);
+    format_seconds_to_clock((get_current_position() + 500000) / 1000000, played_clock_info);
+    sprintf(clock_info, "%s/%s", played_clock_info, duration_clock_info);
+    TTF_SizeUTF8(player.font, clock_info, &(sdlrect_time.w), &(sdlrect_time.h));
+    sdlrect_time.x = player.video_surface.width - sdlrect_time.w - 10;
+    sdlrect_time.y = 20;
+    draw_string(player.video_surface.render, clock_info, color, sdlrect_time);
+}
+
 static int render_video_frame(AVFrame* frame) {
     SDL_Event event;
     AVFrame *frame_display = frame; //default is frame
@@ -584,34 +620,9 @@ static int render_video_frame(AVFrame* frame) {
         SDL_RenderClear(player.video_surface.render);
         SDL_RenderCopy(player.video_surface.render, player.video_surface.texture, NULL, &sdlRect);
 
-        /* draw subtitle here */
-        SDL_Color color = {255, 255, 255};
-        SDL_Rect sdlrect_sub;
-        TTF_SizeUTF8(player.font, player.sub_title_display, &(sdlrect_sub.w), &(sdlrect_sub.h));
-        sdlrect_sub.x = (player.video_surface.width - sdlrect_sub.w) * 0.5;
-        sdlrect_sub.y = player.video_surface.height - sdlrect_sub.h - 20;
-        draw_string(player.video_surface.render, player.sub_title_display, color, sdlrect_sub);
-
-        /*draw autho info */
-        SDL_Rect sdlrect_author;
-        TTF_SizeUTF8(player.font, AUTHORINFO, &(sdlrect_author.w), &(sdlrect_author.h));
-        sdlrect_author.x = 20;
-        sdlrect_author.y = 20;
-        draw_string(player.video_surface.render, AUTHORINFO, color, sdlrect_author);
-
-        /* draw time info */
-        SDL_Rect sdlrect_time;
-        char clock_info[64] = {0};
-        char duration_clock_info[16] = {0};
-        char played_clock_info[16] = {0};
-        format_seconds_to_clock((player.context->duration + 500000) / 1000000, duration_clock_info);
-        format_seconds_to_clock((get_current_position() + 500000) / 1000000, played_clock_info);
-        sprintf(clock_info, "%s/%s", played_clock_info, duration_clock_info);
-        TTF_SizeUTF8(player.font, clock_info, &(sdlrect_time.w), &(sdlrect_time.h));
-        sdlrect_time.x = player.video_surface.width - sdlrect_time.w - 10;
-        sdlrect_time.y = 20;
-        draw_string(player.video_surface.render, clock_info, color, sdlrect_time);
-
+        draw_subtitle();
+		draw_author_info();
+        draw_time_info();
 
         SDL_RenderPresent(player.video_surface.render);
     }
@@ -664,6 +675,13 @@ static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
             len -= length_read;
             //av_log(NULL, AV_LOG_ERROR, "%s, pts:%lld, is_seeking:%d\n", __func__, player.aframe_playing->pkt_pts, player.is_seeking);
             update_audio_clock(player.aframe_playing->pkt_pts);
+            if (player.index_video_stream < 0 ){
+               SDL_RenderClear(player.video_surface.render);
+               draw_subtitle();
+               draw_author_info();
+               draw_time_info();
+               SDL_RenderPresent(player.video_surface.render);
+            }
         }
     }
 }
@@ -809,7 +827,7 @@ static void show_tracks_info() {
 }
 
 
-static int create_video_render(int width, int height, int pixel_format)
+static int create_graphic_render(int width, int height, int pixel_format)
 {
     SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_TIMER);
     player.video_surface.window = SDL_CreateWindow("", 0, 0, width, height, SDL_WINDOW_RESIZABLE);
@@ -1620,11 +1638,13 @@ int main(int argc, char* argv[])
         av_log(NULL, AV_LOG_ERROR, "open %s failed, goto fail\n", file_name);
         return ret;
     }
-    if (player.index_video_stream >= 0)
-        create_video_render(player.video_width, player.video_height, SDL_PIXELFORMAT_IYUV);
+    int window_width = player.video_width > 0 ? player.video_width : 800;
+    int window_height = player.video_height > 0 ? player.video_height:523;
+    create_graphic_render(window_width, window_height, SDL_PIXELFORMAT_IYUV);//render video¡¢subtitle¡¢author¡¢playtimeinfo
 
-    if (player.index_audio_stream>= 0)
+    if (player.index_audio_stream>= 0) {
         create_audio_render(player.audio_channels, player.audio_samplerate, player.audio_format);
+    }
 
     create_draw_string_font();
 
