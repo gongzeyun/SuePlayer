@@ -519,7 +519,7 @@ static reconfig_audio_filter(int samplerate, int audio_format, int channels, int
         av_log(NULL, AV_LOG_ERROR, "reconfig audio filter\n");
         avfilter_graph_free(&player.audio_graph);
         player.audio_graph = NULL;
-        init_audio_filter(samplerate, audio_format, channels, channel_layout);
+        int ret = init_audio_filter(samplerate, audio_format, channels, channel_layout);
         player.audio_samplerate = samplerate;
         player.audio_format = audio_format;
         player.audio_channels = channels;
@@ -659,7 +659,7 @@ static void fill_pcm_data(void *opaque, Uint8 *buffer, int len) {
                 }
                 if (ret == 0 && serial == player.audio_pkts_queue.serial) {
                     player.pos_abuffer_read = 0;
-                    player.pos_abuffer_tail = 2 * player.aframe_playing->nb_samples * av_get_channel_layout_nb_channels(player.aframe_playing->channel_layout);
+                    player.pos_abuffer_tail = 2 * player.aframe_playing->nb_samples * player.aframe_playing->channels;
                 } else {
                     player.is_aplay_end = 1;
                     SDL_memset(buffer, 0, len);
@@ -919,7 +919,10 @@ static int open_audio_decoder(AVFormatContext* context, AVStream *st) {
         player.audio_channels = st->codecpar->channels;
         player.audio_format = st->codecpar->format;
         player.audio_channel_layout = st->codecpar->channel_layout;
-        init_audio_filter(player.audio_samplerate, player.audio_format, player.audio_channels, player.audio_channel_layout);
+        int ret = init_audio_filter(player.audio_samplerate, player.audio_format, player.audio_channels, player.audio_channel_layout);
+        if (ret < 0) {
+            av_log(context, AV_LOG_ERROR, "init_audio_filter failed\n");
+        }
         avcodec_parameters_to_context(player.acodec_context, st->codecpar);
     }
     ret = avcodec_open2(player.acodec_context, NULL, NULL);
@@ -1022,20 +1025,16 @@ static int audio_decoder_threadloop() {
             while (1) {
                 ret = av_buffersink_get_frame(player.sink_audio_filter, filter_audio_frame);
                 if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                    //av_log(NULL, AV_LOG_ERROR, "get filterd audio frame failed, go on\n");
-                    goto go_on;
+                    break;
                 }
                 if (ret == 0) {
-                    int size_audio_sample = 2 * filter_audio_frame->nb_samples * av_get_channel_layout_nb_channels(filter_audio_frame->channel_layout);
-                    //av_log(NULL, AV_LOG_ERROR, "get audio samples %d bytes from audio filter\n", size_audio_sample);
-                    //dump_audio(filter_audio_frame->data[0], size_audio_sample);
                     frame_queue_put(&player.audio_frames_queue, filter_audio_frame, serial);
                     av_frame_unref(filter_audio_frame);
-                    av_frame_unref(audio_frame);
                 } else {
                     av_log(NULL, AV_LOG_ERROR, "get filterd audio frame failed\n");
                     break;
                 }
+                av_frame_unref(audio_frame);
             }
         }
 go_on:
@@ -1089,8 +1088,6 @@ static int subtitle_decoder_threadloop() {
                 }
                 subtitle_frame->pts = sub_frame.pts;
                 AVSubtitleRect* rect = sub_frame.rects[0];
-                //now, we only support ass and txt type
-                //av_log(NULL, AV_LOG_ERROR, "%s, subtitle type:%d\n", __func__, rect->type);
                 if (rect->type == SUBTITLE_ASS) {
                      char text[2048] = {0};
                      get_text_from_ass(rect->ass, text);
@@ -1098,13 +1095,10 @@ static int subtitle_decoder_threadloop() {
                      subtitle_frame->height = 320;
                      subtitle_frame->pkt_duration = pkt.duration;
                      unsigned char *out_buffer = (unsigned char *)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_GRAY8, subtitle_frame->width, subtitle_frame->height, 1));
-                     //av_log(NULL, AV_LOG_ERROR, "%s: malloc addr 0x%x\n", __func__, out_buffer);
                      memcpy(out_buffer, text, 2048);
                      av_image_fill_arrays(subtitle_frame->data, subtitle_frame->linesize, out_buffer,AV_PIX_FMT_GRAY8, subtitle_frame->width, subtitle_frame->height, 1);
-                     //av_log(NULL, AV_LOG_ERROR, "%s:text:%s, start_time:%d, end_time:%d, pts:%lld, duration:%d\n", __func__, 
-                     //         subtitle_frame->data[0], sub_frame.start_display_time, sub_frame.end_display_time, sub_frame.pts, subtitle_frame->pkt_duration);
+
                      frame_queue_put(&player.sub_frames_queue, subtitle_frame, serial);
-                     //av_free(out_buffer);
                 } else {
                     av_log(NULL, AV_LOG_ERROR, "%s, subtitle type %d is not supported\n", __func__, rect->type);
                     avsubtitle_free(&sub_frame);
@@ -1240,7 +1234,6 @@ static int streams_open(const char*name) {
         goto fail;
     }
     player.context = context;
-    av_log(NULL, AV_LOG_ERROR, "start time:%lld\n", (context)->start_time);
     av_dump_format(player.context, 0, player.context->filename, 0);
     get_defalut_tracks(context);
 
@@ -1249,7 +1242,7 @@ static int streams_open(const char*name) {
     AVStream* st_audio = (context)->streams[player.index_audio_stream];
 
     AVStream* st_subtitle = (context)->streams[player.index_subtitle_stream];
-
+    //av_log(NULL, AV_LOG_ERROR, "start time:%lld, video_frames:%lld, audio_frames:%lld\n", (context)->start_time, st_video->nb_frames, st_audio->nb_frames);
     if (player.index_video_stream >= 0) {
         ret = open_video_decoder(context, st_video);
         if (ret < 0) {
