@@ -271,7 +271,6 @@ static int frame_queue_get(SueFrameRingQueue* frame_queue, AVFrame* frame, int *
         } else {
             read_space = (frame_queue->pos_write - frame_queue->pos_read + NUM_FRAMES_RING_BUFFER) % (NUM_FRAMES_RING_BUFFER);
         }
-        //av_log(NULL, AV_LOG_ERROR, "====read, pos_write:%d, pos_read:%d, read_space:%d, abort:%d\n", frame_queue->pos_write, frame_queue->pos_read, read_space, frame_queue->abort);
         if (read_space < 1 || player.paused) {
             pthread_mutex_unlock(&(frame_queue->ring_queue_lock));
             usleep(5 * 1000);
@@ -284,13 +283,11 @@ static int frame_queue_get(SueFrameRingQueue* frame_queue, AVFrame* frame, int *
         frame_queue->pos_read++;
         frame_queue->pos_read %= NUM_FRAMES_RING_BUFFER;
         frame_queue->last_operation = 0;
-        //av_log(NULL, AV_LOG_ERROR, "====read frame(pts:%lld) success, read_pos:%d, serial%d\n", frame->pts, temp_pos_read, frame_queue->sue_frames[frame_queue->pos_read].serial);
         ret = 0;
         break;
     }
 exit:
     pthread_mutex_unlock(&(frame_queue->ring_queue_lock));
-    //av_log(NULL, AV_LOG_ERROR, "%s exit, ret:%d\n", __func__, ret);
     return ret;
 }
 static int packet_queue_init(PacketQueue *queue) {
@@ -330,7 +327,6 @@ static int packet_queue_put(PacketQueue *queue, AVPacket *pkt) {
         if (queue->first_pkt == NULL) {
             queue->first_pkt = queue->last_pkt;
         }
-        //av_log(NULL, AV_LOG_ERROR, "queue pkt(stream:%d, pts:%lld) success, pkt_num:%d\n", pkt->stream_index, pkt->pts, queue->num_packets);
         ret = 0;
         break;
     }
@@ -352,7 +348,6 @@ static int packet_queue_get(PacketQueue *queue, AVPacket* pkt, int *serial) {
                 queue->last_pkt = NULL;
             }
             *serial = sue_pkt->serial;
-            //av_log(NULL, AV_LOG_ERROR, "dequeue pkt(stream:%d, pts:%lld, serial:%d) success\n", pkt->stream_index, pkt->pts, *serial);
             av_free(sue_pkt);
             ret = 0;
             break;
@@ -432,8 +427,6 @@ int dump_audio(Uint8* data, int length)
         return;
     
     fwrite(data, 1, length, pFile);
-
- 
     fclose(pFile);
 }
 
